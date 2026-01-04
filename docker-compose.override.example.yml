@@ -1,0 +1,29 @@
+# docker-compose.override.example.yml
+# Copy to docker-compose.override.yml and customize
+#
+# This file is automatically merged with docker-compose.yml
+
+version: "3.8"
+
+services:
+  easee-controller:
+    # Use host network to access MQTT on localhost
+    # network_mode: host
+    
+    # Or add extra hosts mapping
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    # Override environment variables (secrets that shouldn't be in config.yaml)
+    environment:
+      # Override EASEE credentials from environment
+      - EASEE_USERNAME=${EASEE_USERNAME}
+      - EASEE_PASSWORD=${EASEE_PASSWORD}
+      
+      # Override MQTT credentials
+      - MQTT_USERNAME=${MQTT_USERNAME}
+      - MQTT_PASSWORD=${MQTT_PASSWORD}
+    
+    # Development: mount source for live changes
+    # volumes:
+    #   - ./src:/app/src:ro

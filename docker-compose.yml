@@ -1,0 +1,65 @@
+version: "3.8"
+
+services:
+  easee-controller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: easee-controller
+    restart: unless-stopped
+    
+    # Environment variables (optional - override config.yaml values)
+    # These are useful for secrets that shouldn't be in config.yaml
+    environment:
+      # Only set these if you want to override config.yaml
+      # - EASEE_USERNAME=${EASEE_USERNAME}
+      # - EASEE_PASSWORD=${EASEE_PASSWORD}
+      
+      # Database location (inside container)
+      - DATABASE_PATH=/data/easee_controller.db
+    
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    
+    volumes:
+      # Mount your config.yaml (required)
+      - ./config.yaml:/app/config.yaml:ro
+      
+      # Persist database
+      - easee-data:/data
+    
+    # Network mode: use host network to access MQTT on local network
+    # Uncomment if MQTT broker is on localhost or same network
+    # network_mode: host
+    
+    # Or use bridge network with extra_hosts
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"  # Access host's localhost
+    
+    networks:
+      - easee-network
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Logging
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  easee-data:
+    driver: local
+
+networks:
+  easee-network:
+    driver: bridge

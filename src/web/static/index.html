@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Charging Controller</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e14;
+            --bg-secondary: #131920;
+            --bg-card: #1a2128;
+            --bg-card-hover: #222a33;
+            --accent-cyan: #00d4ff;
+            --accent-green: #00ff9d;
+            --accent-amber: #ffb800;
+            --accent-red: #ff4757;
+            --accent-purple: #a855f7;
+            --text-primary: #e8eaed;
+            --text-secondary: #9aa0a6;
+            --text-muted: #5f6368;
+            --border-color: #2a3038;
+            --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(ellipse at 20% 0%, rgba(0, 212, 255, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 100%, rgba(0, 255, 157, 0.05) 0%, transparent 50%);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-green));
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+
+        .logo h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-green));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: var(--bg-card);
+            border-radius: 20px;
+            font-size: 0.875rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-red);
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.connected {
+            background: var(--accent-green);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 24px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid var(--border-color);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            background: var(--bg-card-hover);
+            border-color: rgba(0, 212, 255, 0.2);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .card-title {
+            font-size: 0.875rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+        }
+
+        .card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .card-icon.cyan { background: rgba(0, 212, 255, 0.15); }
+        .card-icon.green { background: rgba(0, 255, 157, 0.15); }
+        .card-icon.amber { background: rgba(255, 184, 0, 0.15); }
+        .card-icon.purple { background: rgba(168, 85, 247, 0.15); }
+
+        .big-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            line-height: 1.2;
+        }
+
+        .big-value.cyan { color: var(--accent-cyan); }
+        .big-value.green { color: var(--accent-green); }
+        .big-value.amber { color: var(--accent-amber); }
+        .big-value.purple { color: var(--accent-purple); }
+
+        .unit {
+            font-size: 1rem;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-left: 4px;
+        }
+
+        .sub-label {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .stat-row:last-child {
+            border-bottom: none;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+        }
+
+        .fsm-state {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .fsm-state.idle { background: rgba(0, 212, 255, 0.15); color: var(--accent-cyan); }
+        .fsm-state.car_connected { background: rgba(168, 85, 247, 0.15); color: var(--accent-purple); }
+        .fsm-state.charging { background: rgba(0, 255, 157, 0.15); color: var(--accent-green); }
+        .fsm-state.paused_load { background: rgba(255, 184, 0, 0.15); color: var(--accent-amber); }
+        .fsm-state.paused_schedule { background: rgba(255, 184, 0, 0.15); color: var(--accent-amber); }
+        .fsm-state.waiting_for_schedule { background: rgba(168, 85, 247, 0.15); color: var(--accent-purple); }
+        .fsm-state.error { background: rgba(255, 71, 87, 0.15); color: var(--accent-red); }
+
+        .charger-state {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+        }
+
+        .mode-toggle {
+            display: flex;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            padding: 4px;
+            gap: 4px;
+        }
+
+        .mode-btn {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text-secondary);
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .mode-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .mode-btn.active {
+            background: var(--accent-cyan);
+            color: var(--bg-primary);
+        }
+
+        .control-btn {
+            width: 100%;
+            padding: 14px 24px;
+            border: none;
+            border-radius: 10px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .control-btn.primary {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-green));
+            color: var(--bg-primary);
+        }
+
+        .control-btn.primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0, 212, 255, 0.3);
+        }
+
+        .control-btn.secondary {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .control-btn.secondary:hover {
+            border-color: var(--accent-cyan);
+        }
+
+        .control-btn.danger {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--accent-red);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+        }
+
+        .control-btn.danger:hover {
+            background: rgba(255, 71, 87, 0.25);
+        }
+
+        .control-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .btn-group .control-btn {
+            flex: 1;
+        }
+
+        .schedule-window {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            margin-bottom: 8px;
+        }
+
+        .schedule-window.current {
+            background: rgba(0, 255, 157, 0.1);
+            border: 1px solid rgba(0, 255, 157, 0.3);
+        }
+
+        .schedule-window.past {
+            opacity: 0.5;
+        }
+
+        .schedule-time {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+            min-width: 120px;
+        }
+
+        .schedule-price {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            color: var(--accent-green);
+        }
+
+        .schedule-badge {
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: rgba(0, 255, 157, 0.15);
+            color: var(--accent-green);
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .phase-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .phase-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            min-width: 24px;
+        }
+
+        .phase-track {
+            flex: 1;
+            height: 8px;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .phase-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .phase-fill.safe { background: var(--accent-green); }
+        .phase-fill.warning { background: var(--accent-amber); }
+        .phase-fill.danger { background: var(--accent-red); }
+
+        .phase-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            min-width: 50px;
+            text-align: right;
+        }
+
+        .wide-card {
+            grid-column: span 2;
+        }
+
+        @media (max-width: 768px) {
+            .wide-card {
+                grid-column: span 1;
+            }
+            .container {
+                padding: 16px;
+            }
+            header {
+                flex-direction: column;
+                gap: 16px;
+            }
+        }
+
+        .price-chart-container {
+            margin-top: 20px;
+        }
+
+        .price-chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .price-chart-title {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .price-chart-legend {
+            display: flex;
+            gap: 16px;
+            font-size: 0.75rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+        }
+
+        .legend-dot.low { background: #9ca3af; }
+        .legend-dot.medium { background: #f59e0b; }
+        .legend-dot.high { background: #ef4444; }
+        .legend-dot.current { background: #38bdf8; }
+        .legend-dot.scheduled { background: #22c55e; }
+
+        .price-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            height: 120px;
+            padding-bottom: 24px;
+            position: relative;
+        }
+
+        .price-bar-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-end;  /* Bars grow upward from bottom */
+            height: 100%;
+            position: relative;
+        }
+
+        .price-bar {
+            width: 100%;
+            border-radius: 3px 3px 0 0;
+            transition: all 0.3s ease;
+            min-height: 4px;
+            position: relative;
+            cursor: pointer;
+            /* Default - will be overridden by inline style based on price */
+            background: #6b7280;
+        }
+
+        /* Current hour - light blue with glow */
+        .price-bar.current {
+            background: #38bdf8 !important;
+            box-shadow: 0 0 10px #38bdf8, 0 0 20px rgba(56, 189, 248, 0.4);
+        }
+
+        /* Scheduled hours - bright green with glow */
+        .price-bar.scheduled {
+            background: #22c55e !important;
+            box-shadow: 0 0 10px #22c55e, 0 0 20px rgba(34, 197, 94, 0.4);
+        }
+
+        .price-bar:hover {
+            opacity: 0.85;
+            transform: scaleY(1.02);
+        }
+
+        .price-bar-label {
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            position: absolute;
+            bottom: -20px;
+            white-space: nowrap;
+        }
+
+        .price-bar-wrapper:nth-child(4n+1) .price-bar-label {
+            display: block;
+        }
+
+        .price-bar-wrapper .price-bar-label {
+            display: none;
+        }
+
+        .price-bar-wrapper:first-child .price-bar-label,
+        .price-bar-wrapper:nth-child(6n+1) .price-bar-label {
+            display: block;
+        }
+
+        .date-separator {
+            position: absolute;
+            top: 0;
+            bottom: 24px;
+            width: 2px;
+            background: var(--accent-amber);
+            opacity: 0.5;
+        }
+
+        .price-tooltip {
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 100;
+        }
+
+        .price-bar-wrapper:hover .price-tooltip {
+            opacity: 1;
+        }
+
+        .price-axis {
+            position: absolute;
+            left: -40px;
+            top: 0;
+            bottom: 24px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            font-size: 0.65rem;
+            color: var(--text-muted);
+        }
+
+        .no-data {
+            color: var(--text-muted);
+            font-style: italic;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .timestamp {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                <h1>EV Charging Controller</h1>
+            </div>
+            <div class="connection-status">
+                <div class="status-dot" id="wsStatus"></div>
+                <span id="wsStatusText">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="grid">
+            <!-- FSM State Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">System State</span>
+                    <div class="card-icon cyan">🔄</div>
+                </div>
+                <div class="fsm-state idle" id="fsmState">IDLE</div>
+                <div class="sub-label" id="chargerState">Charger: --</div>
+                <div class="sub-label" id="phaseInfo">Phase: --</div>
+                <div class="sub-label" id="sessionInfo" style="display: none;">
+                    <span id="sessionTimer">--</span>
+                </div>
+                <div class="timestamp" id="stateTimestamp">--</div>
+            </div>
+
+            <!-- Charging Power Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Charging Power</span>
+                    <div class="card-icon green">⚡</div>
+                </div>
+                <div class="big-value green" id="chargingPower">0<span class="unit">kW</span></div>
+                <div class="sub-label" id="chargingCurrent">0 A @ 0 A limit</div>
+                <div class="sub-label" id="sessionEnergy">Session: 0 kWh</div>
+            </div>
+
+            <!-- Load Monitor Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Home Load</span>
+                    <div class="card-icon amber">🏠</div>
+                </div>
+                <div class="big-value amber" id="homeLoad">0<span class="unit">A</span></div>
+                <div class="sub-label" id="availableAmps">Available for EV: -- A</div>
+                <div style="margin-top: 16px;">
+                    <div class="phase-bar">
+                        <span class="phase-label">L1</span>
+                        <div class="phase-track"><div class="phase-fill safe" id="phaseL1Fill" style="width: 0%"></div></div>
+                        <span class="phase-value" id="phaseL1">0 A</span>
+                    </div>
+                    <div class="phase-bar">
+                        <span class="phase-label">L2</span>
+                        <div class="phase-track"><div class="phase-fill safe" id="phaseL2Fill" style="width: 0%"></div></div>
+                        <span class="phase-value" id="phaseL2">0 A</span>
+                    </div>
+                    <div class="phase-bar">
+                        <span class="phase-label">L3</span>
+                        <div class="phase-track"><div class="phase-fill safe" id="phaseL3Fill" style="width: 0%"></div></div>
+                        <span class="phase-value" id="phaseL3">0 A</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Price Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Electricity Price</span>
+                    <div class="card-icon purple">💰</div>
+                </div>
+                <div class="big-value purple" id="currentPrice">--<span class="unit">SEK/kWh</span></div>
+                <div class="sub-label" id="priceLevel">--</div>
+                <div class="stat-row">
+                    <span class="stat-label">Average (24h)</span>
+                    <span class="stat-value" id="avgPrice">--</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Min / Max</span>
+                    <span class="stat-value" id="minMaxPrice">--</span>
+                </div>
+            </div>
+
+            <!-- Solar Card -->
+            <div class="card" id="solarCard" style="display: none;">
+                <div class="card-header">
+                    <span class="card-title">Solar Production</span>
+                    <div class="card-icon" style="background: rgba(255, 200, 50, 0.15);">☀️</div>
+                </div>
+                <!-- Normal solar data view -->
+                <div id="solarDataView">
+                    <div class="big-value" style="color: #ffc832;" id="solarPower">--<span class="unit">kW</span></div>
+                    <div class="sub-label" id="solarStatus">--</div>
+                    <div class="stat-row">
+                        <span class="stat-label">Grid</span>
+                        <span class="stat-value" id="gridPower">--</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Battery</span>
+                        <span class="stat-value" id="batteryStatus">--</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Today</span>
+                        <span class="stat-value" id="solarToday">--</span>
+                    </div>
+                </div>
+                <!-- Login error view (shown when CAPTCHA required) -->
+                <div id="solarLoginView" style="display: none;">
+                    <div class="big-value" style="color: var(--accent-amber); font-size: 1.5rem;">⚠️ Login Required</div>
+                    <div class="sub-label" id="solarError" style="color: var(--accent-amber);">CAPTCHA verification needed</div>
+                    
+                    <!-- CAPTCHA input section -->
+                    <div id="captchaSection" style="display: none; margin-top: 16px; padding: 12px; background: rgba(255, 183, 0, 0.1); border-radius: 8px; border: 1px solid var(--accent-amber);">
+                        <p style="color: var(--text-primary); margin-bottom: 12px; font-size: 0.875rem;">
+                            <strong>Enter CAPTCHA:</strong>
+                        </p>
+                        <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 12px;">
+                            <img id="captchaImage" src="" alt="CAPTCHA" 
+                                 style="height: 50px; border-radius: 4px; border: 1px solid var(--border-color); background: white;">
+                            <button class="control-btn secondary" onclick="refreshCaptcha()" style="flex-shrink: 0; padding: 8px 12px;">
+                                🔄
+                            </button>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="text" id="captchaInput" placeholder="Enter code" 
+                                   style="flex: 1; padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; 
+                                          background: var(--bg-secondary); color: var(--text-primary); font-size: 1rem; font-family: 'Outfit', sans-serif;">
+                            <button class="control-btn primary" onclick="submitCaptcha()" style="flex-shrink: 0;">
+                                Submit
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Manual login fallback -->
+                    <div id="manualLoginSection" style="display: none; margin-top: 16px; padding: 12px; background: rgba(255, 183, 0, 0.1); border-radius: 8px; border: 1px solid var(--accent-amber);">
+                        <p style="color: var(--text-primary); margin-bottom: 12px; font-size: 0.875rem;">
+                            <strong>⚠️ Manual Login Required</strong><br>
+                            Unable to show CAPTCHA. Please log in via the web portal.
+                        </p>
+                        <div class="btn-group" style="gap: 8px; flex-wrap: wrap;">
+                            <a href="https://eop.saj-electric.com/login" target="_blank" 
+                               class="control-btn primary" style="text-decoration: none; text-align: center;">
+                                🔗 Open SAJ Login
+                            </a>
+                            <button class="control-btn secondary" onclick="retrySolarLogin()">
+                                🔄 Retry Login
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Control Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Charging Mode</span>
+                    <div class="card-icon cyan">⚙️</div>
+                </div>
+                <div class="mode-toggle">
+                    <button class="mode-btn" id="modeManual" onclick="setMode('manual')">Manual</button>
+                    <button class="mode-btn active" id="modeSmart" onclick="setMode('smart')">Smart</button>
+                </div>
+                <div class="btn-group">
+                    <button class="control-btn primary" id="btnStart" onclick="startCharging()">
+                        ▶ Start
+                    </button>
+                    <button class="control-btn danger" id="btnStop" onclick="stopCharging()">
+                        ⏹ Stop
+                    </button>
+                </div>
+                <div class="btn-group">
+                    <button class="control-btn secondary" id="btnResume" onclick="resumeCharging()">
+                        ⏯ Resume
+                    </button>
+                </div>
+            </div>
+
+            <!-- Schedule Card -->
+            <div class="card wide-card">
+                <div class="card-header">
+                    <span class="card-title">Charging Schedule</span>
+                    <div class="card-icon green">📅</div>
+                </div>
+                <div id="scheduleInfo">
+                    <div class="stat-row" style="flex-direction: column; align-items: stretch;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                            <span class="stat-label">Target Energy</span>
+                            <span class="stat-value" id="targetKwh">-- kWh</span>
+                        </div>
+                        <input type="range" id="targetKwhSlider" min="5" max="80" step="5" value="10" 
+                               style="width: 100%; accent-color: #22c55e; cursor: pointer;">
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Estimated Cost</span>
+                        <span class="stat-value" id="estCost">-- SEK</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Status</span>
+                        <span class="stat-value" id="scheduleStatus">--</span>
+                    </div>
+                </div>
+                <div id="scheduleWindows" style="margin-top: 16px;">
+                    <div class="no-data">No schedule available</div>
+                </div>
+            </div>
+
+            <!-- 48-Hour Price Chart Card -->
+            <div class="card wide-card">
+                <div class="card-header">
+                    <span class="card-title">48-Hour Price Forecast</span>
+                    <div class="card-icon purple">📊</div>
+                </div>
+                <div class="price-chart-container">
+                    <div class="price-chart-header">
+                        <div class="price-chart-title" id="priceChartRange">--</div>
+                        <div class="price-chart-legend">
+                            <div class="legend-item"><span class="legend-dot low"></span>Low</div>
+                            <div class="legend-item"><span class="legend-dot medium"></span>Medium</div>
+                            <div class="legend-item"><span class="legend-dot high"></span>High</div>
+                            <div class="legend-item"><span class="legend-dot current"></span>Now</div>
+                            <div class="legend-item"><span class="legend-dot scheduled"></span>Scheduled</div>
+                        </div>
+                    </div>
+                    <div class="price-chart" id="priceChart">
+                        <div class="no-data">Loading prices...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let reconnectTimeout = null;
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+            ws.onopen = () => {
+                document.getElementById('wsStatus').classList.add('connected');
+                document.getElementById('wsStatusText').textContent = 'Connected';
+                if (reconnectTimeout) {
+                    clearTimeout(reconnectTimeout);
+                    reconnectTimeout = null;
+                }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('wsStatus').classList.remove('connected');
+                document.getElementById('wsStatusText').textContent = 'Disconnected';
+                reconnectTimeout = setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateUI(data);
+                } catch (e) {
+                    console.error('Failed to parse message:', e);
+                }
+            };
+        }
+
+        // Format duration in HH:MM:SS
+        function formatDuration(ms) {
+            const totalSeconds = Math.floor(ms / 1000);
+            const hours = Math.floor(totalSeconds / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = totalSeconds % 60;
+            
+            if (hours > 0) {
+                return `${hours}h ${minutes.toString().padStart(2, '0')}m ${seconds.toString().padStart(2, '0')}s`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+            } else {
+                return `${seconds}s`;
+            }
+        }
+
+        // Update session timer display
+        function updateSessionTimer() {
+            if (!window.sessionData) return;
+            
+            const now = new Date();
+            let timerText = '';
+            
+            // Use FSM timestamps for session timing
+            if (window.sessionData.car_connected_at) {
+                const carConnected = new Date(window.sessionData.car_connected_at);
+                const connectedDuration = now - carConnected;
+                timerText = `🚗 Connected: ${formatDuration(connectedDuration)}`;
+                
+                // If charging, also show charging duration
+                if (window.sessionData.is_charging && window.sessionData.charging_started_at) {
+                    const chargingStarted = new Date(window.sessionData.charging_started_at);
+                    const chargingDuration = now - chargingStarted;
+                    timerText += ` | ⚡ Charging: ${formatDuration(chargingDuration)}`;
+                }
+            }
+            
+            if (window.sessionData.session_energy_kwh > 0) {
+                timerText += ` | ${window.sessionData.session_energy_kwh.toFixed(2)} kWh`;
+            }
+            
+            document.getElementById('sessionTimer').textContent = timerText;
+        }
+
+        // Start session timer interval
+        setInterval(updateSessionTimer, 1000);
+
+        function updateUI(data) {
+            // FSM State
+            if (data.fsm) {
+                const fsm = data.fsm;
+                const stateEl = document.getElementById('fsmState');
+                stateEl.textContent = fsm.state.toUpperCase().replace(/_/g, ' ');
+                stateEl.className = 'fsm-state ' + fsm.state;
+
+                document.getElementById('chargerState').textContent = 
+                    `Charger: ${fsm.charger_state || '--'}`;
+
+                // Phase detection info
+                if (fsm.phase_detection?.detected_phases) {
+                    const phases = fsm.phase_detection.detected_phases;
+                    const power = fsm.phase_detection.detected_power_kw?.toFixed(1) || '--';
+                    document.getElementById('phaseInfo').textContent = 
+                        `${phases}-phase @ ${power} kW max`;
+                } else {
+                    document.getElementById('phaseInfo').textContent = 'Phase: --';
+                }
+
+                // Session timer info using FSM timestamps
+                const sessionInfoEl = document.getElementById('sessionInfo');
+                const fsmCarConnected = fsm.timestamps?.car_connected_at;
+                
+                if (fsmCarConnected && fsm.state !== 'idle') {
+                    sessionInfoEl.style.display = 'block';
+                    // Store timestamps for live timer updates
+                    window.sessionData = {
+                        car_connected_at: fsmCarConnected,
+                        charging_started_at: fsm.timestamps?.charging_started_at,
+                        session_energy_kwh: data.charger?.session_energy_kwh || fsm.session_energy_kwh || 0,
+                        is_charging: fsm.state === 'charging'
+                    };
+                    updateSessionTimer();
+                } else {
+                    sessionInfoEl.style.display = 'none';
+                    window.sessionData = null;
+                }
+
+                if (fsm.timestamps?.state_entered_at) {
+                    const d = new Date(fsm.timestamps.state_entered_at);
+                    document.getElementById('stateTimestamp').textContent = 
+                        `Since ${d.toLocaleTimeString()}`;
+                }
+
+                // Mode buttons
+                document.getElementById('modeManual').classList.toggle('active', fsm.mode === 'manual');
+                document.getElementById('modeSmart').classList.toggle('active', fsm.mode === 'smart');
+
+                // Control buttons - enable/disable based on state
+                const state = fsm.state;
+                const btnStart = document.getElementById('btnStart');
+                const btnStop = document.getElementById('btnStop');
+                const btnResume = document.getElementById('btnResume');
+
+                // Start: enabled when car_connected, waiting_for_schedule, or paused states (not charging/idle)
+                btnStart.disabled = ['idle', 'charging', 'charge_complete', 'error'].includes(state);
+                
+                // Stop: enabled when charging or any active state
+                btnStop.disabled = ['idle', 'charge_complete', 'error'].includes(state);
+                
+                // Resume: enabled only when paused
+                btnResume.disabled = !['paused_load', 'paused_schedule', 'paused_user'].includes(state);
+
+                // Charging info
+                const powerKw = (fsm.charger_power_watts || 0) / 1000;
+                document.getElementById('chargingPower').innerHTML = 
+                    `${powerKw.toFixed(1)}<span class="unit">kW</span>`;
+                document.getElementById('chargingCurrent').textContent = 
+                    `${fsm.charger_current_amps || 0} A @ ${Math.round(fsm.current_limit_amps || 0)} A limit`;
+                document.getElementById('sessionEnergy').textContent = 
+                    `Session: ${(fsm.session_energy_kwh || 0).toFixed(2)} kWh`;
+            }
+
+            // Load
+            if (data.load) {
+                const load = data.load;
+                document.getElementById('homeLoad').innerHTML = 
+                    `${(load.home_current_amps || 0).toFixed(1)}<span class="unit">A</span>`;
+                document.getElementById('availableAmps').textContent = 
+                    `Available for EV: ${(load.available_for_ev_amps || 0).toFixed(1)} A`;
+
+                const fuseLimit = load.fuse_limit || 25;
+                
+                if (load.phases) {
+                    updatePhaseBar('L1', load.phases.l1 || 0, fuseLimit);
+                    updatePhaseBar('L2', load.phases.l2 || 0, fuseLimit);
+                    updatePhaseBar('L3', load.phases.l3 || 0, fuseLimit);
+                }
+            }
+
+            // Prices
+            if (data.prices && !data.prices.error) {
+                const prices = data.prices;
+                if (prices.current) {
+                    document.getElementById('currentPrice').innerHTML = 
+                        `${(prices.current.price_sek || 0).toFixed(2)}<span class="unit">SEK/kWh</span>`;
+                    document.getElementById('priceLevel').textContent = 
+                        prices.current.is_night_rate ? '🌙 Night rate' : '☀️ Day rate';
+                }
+                document.getElementById('avgPrice').textContent = 
+                    `${(prices.average_24h || 0).toFixed(2)} SEK`;
+                
+                if (prices.min_24h && prices.max_24h) {
+                    document.getElementById('minMaxPrice').textContent = 
+                        `${prices.min_24h.price?.toFixed(2) || '--'} / ${prices.max_24h.price?.toFixed(2) || '--'} SEK`;
+                }
+
+                // Render price chart
+                if (prices.hourly && prices.hourly.length > 0) {
+                    renderPriceChart(prices.hourly, prices.min_24h?.price, prices.max_24h?.price);
+                }
+            }
+
+            // Solar
+            if (data.solar && data.solar.enabled) {
+                const solar = data.solar;
+                const solarCard = document.getElementById('solarCard');
+                const solarDataView = document.getElementById('solarDataView');
+                const solarLoginView = document.getElementById('solarLoginView');
+                solarCard.style.display = 'block';
+
+                // Check if login error / CAPTCHA required
+                if (solar.needs_captcha || (solar.error && !solar.is_online)) {
+                    // Show login view
+                    solarDataView.style.display = 'none';
+                    solarLoginView.style.display = 'block';
+                    document.getElementById('solarError').textContent = 
+                        solar.error || 'CAPTCHA verification needed';
+                    
+                    // Show CAPTCHA section if we have a CAPTCHA image
+                    const captchaSection = document.getElementById('captchaSection');
+                    const manualSection = document.getElementById('manualLoginSection');
+                    
+                    if (solar.captcha_image) {
+                        // Show CAPTCHA input
+                        captchaSection.style.display = 'block';
+                        manualSection.style.display = 'none';
+                        
+                        // Update CAPTCHA image (already has data URI prefix from API)
+                        const imgEl = document.getElementById('captchaImage');
+                        imgEl.src = solar.captcha_image;
+                    } else {
+                        // No CAPTCHA image - show manual login fallback
+                        captchaSection.style.display = 'none';
+                        manualSection.style.display = 'block';
+                    }
+                } else if (!solar.is_online) {
+                    // Show offline state
+                    solarDataView.style.display = 'block';
+                    solarLoginView.style.display = 'none';
+                    document.getElementById('solarPower').innerHTML = 
+                        `--<span class="unit">kW</span>`;
+                    document.getElementById('solarStatus').textContent = '❌ Offline';
+                    document.getElementById('gridPower').textContent = '--';
+                    document.getElementById('batteryStatus').textContent = '--';
+                    document.getElementById('solarToday').textContent = '--';
+                } else {
+                    // Show normal data
+                    solarDataView.style.display = 'block';
+                    solarLoginView.style.display = 'none';
+                    
+                    const pvKw = (solar.power?.pv_watts || 0) / 1000;
+                    document.getElementById('solarPower').innerHTML = 
+                        `${pvKw.toFixed(1)}<span class="unit">kW</span>`;
+
+                    // Status: exporting or importing
+                    const gridW = solar.power?.grid_watts || 0;
+                    if (gridW < -50) {
+                        document.getElementById('solarStatus').textContent = 
+                            `📤 Exporting ${Math.abs(gridW / 1000).toFixed(1)} kW`;
+                    } else if (gridW > 50) {
+                        document.getElementById('solarStatus').textContent = 
+                            `📥 Importing ${(gridW / 1000).toFixed(1)} kW`;
+                    } else {
+                        document.getElementById('solarStatus').textContent = '⚖️ Balanced';
+                    }
+
+                    // Grid power
+                    document.getElementById('gridPower').textContent = 
+                        gridW < 0 ? `Export ${Math.abs(gridW).toFixed(0)} W` : `Import ${gridW.toFixed(0)} W`;
+
+                    // Battery
+                    const batSoc = solar.battery?.soc_percent || 0;
+                    const batW = solar.power?.battery_watts || 0;
+                    let batStatus = `${batSoc.toFixed(0)}%`;
+                    if (batW > 50) batStatus += ' ⬆️ Charging';
+                    else if (batW < -50) batStatus += ' ⬇️ Discharging';
+                    document.getElementById('batteryStatus').textContent = batStatus;
+
+                    // Today's production
+                    document.getElementById('solarToday').textContent = 
+                        `${(solar.today_kwh?.pv || 0).toFixed(1)} kWh`;
+                }
+            } else {
+                document.getElementById('solarCard').style.display = 'none';
+            }
+
+            // Schedule
+            if (data.schedule) {
+                const sched = data.schedule;
+                const targetKwh = sched.target_kwh || 10;
+                document.getElementById('targetKwh').textContent = `${targetKwh} kWh`;
+                
+                // Update slider if not being dragged
+                const slider = document.getElementById('targetKwhSlider');
+                if (document.activeElement !== slider) {
+                    slider.value = targetKwh;
+                }
+                
+                document.getElementById('estCost').textContent = 
+                    sched.estimated_cost_sek ? `${sched.estimated_cost_sek.toFixed(2)} SEK` : '--';
+                document.getElementById('scheduleStatus').textContent = 
+                    sched.is_in_window ? '✅ In charging window' : '⏳ Waiting for window';
+
+                const windowsEl = document.getElementById('scheduleWindows');
+                if (sched.windows && sched.windows.length > 0) {
+                    windowsEl.innerHTML = sched.windows.map(w => {
+                        const start = new Date(w.start);
+                        const end = new Date(w.end);
+                        const classes = ['schedule-window'];
+                        if (w.is_current) classes.push('current');
+                        if (w.is_past) classes.push('past');
+                        
+                        // Format date label
+                        const today = new Date();
+                        const tomorrow = new Date(today);
+                        tomorrow.setDate(tomorrow.getDate() + 1);
+                        let dateLabel = '';
+                        if (start.toDateString() === today.toDateString()) {
+                            dateLabel = 'Today';
+                        } else if (start.toDateString() === tomorrow.toDateString()) {
+                            dateLabel = 'Tomorrow';
+                        } else {
+                            dateLabel = start.toLocaleDateString([], {month: 'short', day: 'numeric'});
+                        }
+                        
+                        return `
+                            <div class="${classes.join(' ')}">
+                                <span class="schedule-time">
+                                    <span style="color: var(--text-muted); font-size: 0.75rem;">${dateLabel}</span>
+                                    ${start.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})} - ${end.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}
+                                </span>
+                                <span class="schedule-price">${w.price_sek?.toFixed(2) || '--'} SEK</span>
+                                ${w.is_current ? '<span class="schedule-badge">Now</span>' : ''}
+                            </div>
+                        `;
+                    }).join('');
+                } else {
+                    windowsEl.innerHTML = '<div class="no-data">No scheduled windows</div>';
+                }
+            }
+        }
+
+        function renderPriceChart(hourly, minPrice, maxPrice) {
+            const chartEl = document.getElementById('priceChart');
+            const rangeEl = document.getElementById('priceChartRange');
+            
+            if (!hourly || hourly.length === 0) {
+                chartEl.innerHTML = '<div class="no-data">No price data</div>';
+                return;
+            }
+
+            // Calculate price range for scaling
+            const prices = hourly.map(h => h.price_sek);
+            const min = Math.min(...prices);
+            const max = Math.max(...prices);
+            const range = max - min || 1;
+
+            // Get date range for header
+            const firstDate = new Date(hourly[0].start);
+            const lastDate = new Date(hourly[hourly.length - 1].start);
+            
+            const formatDate = (d) => {
+                const today = new Date();
+                const tomorrow = new Date(today);
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                
+                if (d.toDateString() === today.toDateString()) return 'Today';
+                if (d.toDateString() === tomorrow.toDateString()) return 'Tomorrow';
+                return d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+            };
+            
+            rangeEl.textContent = `${formatDate(firstDate)} → ${formatDate(lastDate)} | Min: ${min.toFixed(2)} SEK | Max: ${max.toFixed(2)} SEK`;
+
+            // Function to get color based on price level (0-1)
+            // Low = light grey, Medium = yellow/amber, High = red
+            function getPriceColor(priceRatio) {
+                if (priceRatio < 0.33) {
+                    // Low price: light grey (#9ca3af)
+                    return '#9ca3af';
+                } else if (priceRatio < 0.66) {
+                    // Medium price: interpolate grey -> yellow/amber
+                    const t = (priceRatio - 0.33) / 0.33;
+                    // From grey (#9ca3af = 156,163,175) to amber (#f59e0b = 245,158,11)
+                    const r = Math.round(156 + (245 - 156) * t);
+                    const g = Math.round(163 + (158 - 163) * t);
+                    const b = Math.round(175 + (11 - 175) * t);
+                    return `rgb(${r},${g},${b})`;
+                } else {
+                    // High price: interpolate yellow/amber -> red
+                    const t = (priceRatio - 0.66) / 0.34;
+                    // From amber (#f59e0b = 245,158,11) to red (#ef4444 = 239,68,68)
+                    const r = Math.round(245 + (239 - 245) * t);
+                    const g = Math.round(158 + (68 - 158) * t);
+                    const b = Math.round(11 + (68 - 11) * t);
+                    return `rgb(${r},${g},${b})`;
+                }
+            }
+
+            // Build bars - Standard: high price = tall bar, low price = short bar
+            let lastDate_ = null;
+            let html = '';
+            
+            hourly.forEach((h, idx) => {
+                // Standard price chart: high price = tall bar, low price = short bar
+                const heightPercent = ((h.price_sek - min) / range) * 75 + 20; // 20-95% height
+                const priceRatio = (h.price_sek - min) / range; // 0 = cheapest, 1 = most expensive
+                const barColor = getPriceColor(priceRatio);
+                const currentDate = h.date;
+                
+                // Date separator
+                if (lastDate_ && lastDate_ !== currentDate) {
+                    html += `<div class="date-separator" style="left: ${(idx / hourly.length) * 100}%"></div>`;
+                }
+                lastDate_ = currentDate;
+                
+                // Build class list - only add current/scheduled, color is determined by price
+                const classes = ['price-bar'];
+                if (h.is_current) classes.push('current');
+                if (h.is_scheduled) classes.push('scheduled');
+                
+                // Format tooltip
+                const today = new Date();
+                const tomorrow = new Date(today);
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                const barDate = new Date(h.start);
+                let dayLabel = '';
+                if (barDate.toDateString() === today.toDateString()) {
+                    dayLabel = 'Today';
+                } else if (barDate.toDateString() === tomorrow.toDateString()) {
+                    dayLabel = 'Tmr';
+                } else {
+                    dayLabel = h.date;
+                }
+                
+                const rateLabel = h.is_night_rate ? '🌙' : '☀️';
+                const scheduledLabel = h.is_scheduled ? ' ✅ Scheduled' : '';
+                
+                // Show label every 6 hours or at midnight
+                const showLabel = (h.hour % 6 === 0) || idx === 0;
+                
+                html += `
+                    <div class="price-bar-wrapper">
+                        <div class="price-tooltip">
+                            ${dayLabel} ${h.hour}:00 ${rateLabel}<br>
+                            <strong>${h.price_sek.toFixed(2)} SEK/kWh</strong>${scheduledLabel}
+                        </div>
+                        <div class="${classes.join(' ')}" style="height: ${heightPercent}%; background-color: ${barColor}"></div>
+                        ${showLabel ? `<span class="price-bar-label">${h.hour}:00</span>` : ''}
+                    </div>
+                `;
+            });
+            
+            chartEl.innerHTML = html;
+        }
+
+        function updatePhaseBar(phase, current, limit) {
+            const percent = Math.min(100, (current / limit) * 100);
+            const fill = document.getElementById(`phase${phase}Fill`);
+            const value = document.getElementById(`phase${phase}`);
+            
+            fill.style.width = `${percent}%`;
+            fill.className = 'phase-fill ' + (percent > 90 ? 'danger' : percent > 70 ? 'warning' : 'safe');
+            value.textContent = `${current.toFixed(1)} A`;
+        }
+
+        async function setMode(mode) {
+            try {
+                const resp = await fetch('/api/mode', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mode})
+                });
+                if (!resp.ok) throw new Error('Failed to set mode');
+            } catch (e) {
+                console.error('Error setting mode:', e);
+                alert('Failed to change mode');
+            }
+        }
+
+        // Target kWh slider handling
+        let targetKwhTimeout = null;
+        async function setTargetKwh(kwh) {
+            try {
+                const resp = await fetch('/api/schedule/target', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({target_kwh: kwh})
+                });
+                if (!resp.ok) throw new Error('Failed to set target');
+            } catch (e) {
+                console.error('Error setting target:', e);
+            }
+        }
+
+        // Initialize slider event handlers
+        document.addEventListener('DOMContentLoaded', function() {
+            const slider = document.getElementById('targetKwhSlider');
+            if (slider) {
+                // Update display on input (while dragging)
+                slider.addEventListener('input', function() {
+                    document.getElementById('targetKwh').textContent = `${this.value} kWh`;
+                });
+                
+                // Send to server on change (after releasing)
+                slider.addEventListener('change', function() {
+                    // Debounce: wait 500ms before sending
+                    clearTimeout(targetKwhTimeout);
+                    targetKwhTimeout = setTimeout(() => {
+                        setTargetKwh(parseFloat(this.value));
+                    }, 500);
+                });
+            }
+        });
+
+        async function startCharging() {
+            try {
+                const resp = await fetch('/api/charger/start', {method: 'POST'});
+                if (!resp.ok) throw new Error('Failed to start');
+            } catch (e) {
+                console.error('Error starting:', e);
+                alert('Failed to start charging');
+            }
+        }
+
+        async function stopCharging() {
+            try {
+                const resp = await fetch('/api/charger/stop', {method: 'POST'});
+                if (!resp.ok) throw new Error('Failed to stop');
+            } catch (e) {
+                console.error('Error stopping:', e);
+                alert('Failed to stop charging');
+            }
+        }
+
+        async function resumeCharging() {
+            try {
+                const resp = await fetch('/api/charger/resume', {method: 'POST'});
+                if (!resp.ok) throw new Error('Failed to resume');
+            } catch (e) {
+                console.error('Error resuming:', e);
+                alert('Failed to resume charging');
+            }
+        }
+
+        async function retrySolarLogin() {
+            try {
+                document.getElementById('solarError').textContent = 'Retrying login...';
+                const resp = await fetch('/api/solar/retry', {method: 'POST'});
+                if (!resp.ok) {
+                    const data = await resp.json();
+                    throw new Error(data.detail || 'Login failed');
+                }
+                // Success - will auto-update via WebSocket
+            } catch (e) {
+                console.error('Error retrying SAJ login:', e);
+                document.getElementById('solarError').textContent = e.message || 'Login failed';
+            }
+        }
+
+        async function refreshCaptcha() {
+            try {
+                const resp = await fetch('/api/solar/captcha');
+                if (!resp.ok) {
+                    const data = await resp.json();
+                    throw new Error(data.detail || 'Failed to get CAPTCHA');
+                }
+                const data = await resp.json();
+                if (data.image) {
+                    const imgEl = document.getElementById('captchaImage');
+                    // Image may already have data URI prefix
+                    imgEl.src = data.image.startsWith('data:') 
+                        ? data.image 
+                        : 'data:image/png;base64,' + data.image;
+                    document.getElementById('captchaSection').style.display = 'block';
+                    document.getElementById('captchaInput').value = '';
+                    document.getElementById('captchaInput').focus();
+                }
+            } catch (e) {
+                console.error('Error refreshing CAPTCHA:', e);
+                document.getElementById('solarError').textContent = e.message || 'Failed to get CAPTCHA';
+            }
+        }
+
+        async function submitCaptcha() {
+            const code = document.getElementById('captchaInput').value.trim();
+            if (!code) {
+                alert('Please enter the CAPTCHA code');
+                return;
+            }
+            
+            try {
+                document.getElementById('solarError').textContent = 'Logging in...';
+                const resp = await fetch('/api/solar/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({captcha_code: code})
+                });
+                if (!resp.ok) {
+                    const data = await resp.json();
+                    throw new Error(data.detail || 'Login failed');
+                }
+                // Success - will auto-update via WebSocket
+                document.getElementById('captchaSection').style.display = 'none';
+            } catch (e) {
+                console.error('Error submitting CAPTCHA:', e);
+                document.getElementById('solarError').textContent = e.message || 'Login failed';
+                // Refresh CAPTCHA for retry
+                await refreshCaptcha();
+            }
+        }
+
+        // Handle Enter key in CAPTCHA input
+        document.addEventListener('DOMContentLoaded', function() {
+            const captchaInput = document.getElementById('captchaInput');
+            if (captchaInput) {
+                captchaInput.addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter') {
+                        submitCaptcha();
+                    }
+                });
+            }
+        });
+
+        // Initial data load
+        async function loadInitialData() {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+                updateUI(data);
+            } catch (e) {
+                console.error('Failed to load initial data:', e);
+            }
+        }
+
+        // Start
+        loadInitialData();
+        connectWebSocket();
+    </script>
+</body>
+</html>

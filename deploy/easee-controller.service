@@ -1,0 +1,41 @@
+[Unit]
+Description=EASEE Smart Charger Controller
+Documentation=https://github.com/yourusername/easee-controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+
+# Working directory
+WorkingDirectory=/home/pi/easee-controller
+
+# Environment
+Environment="PATH=/home/pi/easee-controller/venv/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Main process
+ExecStart=/home/pi/easee-controller/venv/bin/python -m src.main
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=append:/var/log/easee-controller/stdout.log
+StandardError=append:/var/log/easee-controller/stderr.log
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/easee-controller /var/lib/easee-controller /home/pi/easee-controller/data
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
+

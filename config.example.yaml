@@ -1,0 +1,223 @@
+# ==============================================================================
+# EASEE Smart Charger Controller - Configuration
+# ==============================================================================
+# Copy this file to config.yaml and fill in your settings.
+# Environment variables can override any setting (useful for Docker secrets).
+
+# ------------------------------------------------------------------------------
+# EASEE Charger
+# ------------------------------------------------------------------------------
+easee:
+  # Your EASEE account credentials (from the EASEE app)
+  username: "your_email@example.com"
+  password: "your_password"
+  
+  # Your charger ID (find it in the EASEE app under charger settings)
+  charger_id: "EHXXXXXX"
+  
+  # Maximum charging current in Amps (6-32)
+  # This is limited by your CHARGER's dedicated circuit breaker (NOT the house main fuse)
+  # Example: If your charger circuit breaker is 16A, set this to 16
+  max_current: 16
+
+# ------------------------------------------------------------------------------
+# MQTT Broker (for SaveEye data)
+# ------------------------------------------------------------------------------
+mqtt:
+  host: "192.168.1.100"
+  port: 1883
+  
+  # Authentication (leave empty if not required)
+  username: ""
+  password: ""
+  
+  # Client identifier
+  client_id: "easee-controller"
+  
+  # Use TLS/SSL connection
+  use_tls: false
+
+# ------------------------------------------------------------------------------
+# SaveEye - Real-time Consumption Monitoring
+# ------------------------------------------------------------------------------
+saveeye:
+  # Connection mode: "mqtt" (recommended) or "http" (legacy)
+  mode: "mqtt"
+  
+  # MQTT topic where SaveEye publishes telemetry
+  mqtt_topic: "saveeye/telemetry"
+  
+  # If SaveEye is unavailable:
+  #   false = disable overload protection, charging continues without limits
+  #   true  = fail startup if SaveEye cannot be reached
+  required: false
+  
+  # HTTP mode settings (only used if mode: "http")
+  http:
+    host: "192.168.1.100"
+    port: 80
+    poll_interval: 5
+
+# ------------------------------------------------------------------------------
+# Home Electrical System
+# ------------------------------------------------------------------------------
+home:
+  # Main fuse rating in Amps - the HOUSE main fuse/breaker (e.g., 16, 20, 25, 32, 40, 50, 63)
+  # This is used by the load balancer to prevent overloading the entire house
+  # Note: Different from the charger's circuit breaker (easee.max_current above)
+  main_fuse_amps: 25
+  
+  # Safety margin - how much below max to stay (recommended: 2-5A)
+  safety_margin_amps: 2
+  
+  # Number of phases (1 or 3)
+  phases: 3
+  
+  # Voltage per phase (usually 230V in Europe, 120V in North America)
+  voltage: 230
+
+# ------------------------------------------------------------------------------
+# Electricity Price
+# ------------------------------------------------------------------------------
+price:
+  # Data source: "nordpool", "tibber", or "entsoe"
+  source: "nordpool"
+  
+  # Nord Pool price area
+  # Norway: NO1 (Oslo), NO2 (Kristiansand), NO3 (Trondheim), NO4 (Tromsø), NO5 (Bergen)
+  # Sweden: SE1 (Luleå), SE2 (Sundsvall), SE3 (Stockholm), SE4 (Malmö)
+  # Denmark: DK1 (West), DK2 (East)
+  # Finland: FI
+  # Baltic: EE (Estonia), LV (Latvia), LT (Lithuania)
+  nordpool_area: "SE3"
+  
+  # Tibber API token (only needed if source: "tibber")
+  tibber_access_token: ""
+  
+  # Currency for price display
+  currency: "SEK"
+  
+  # VAT/Moms percentage (25% in Sweden)
+  # Nord Pool prices are excluding VAT, this adds it to the displayed price
+  vat_percent: 25.0
+
+# ------------------------------------------------------------------------------
+# Grid Tariff (Effektavgift / Network Fees)
+# ------------------------------------------------------------------------------
+# These fees are added ON TOP of the spot electricity price
+# Many Swedish grid operators charge different rates for day/night
+grid_tariff:
+  # Enable grid tariff in cost calculations
+  enabled: true
+  
+  # Daytime rate (öre/kWh) - typically 06:00-22:00
+  day_rate_ore: 85
+  
+  # Nighttime rate (öre/kWh) - typically 22:00-06:00  
+  night_rate_ore: 42
+  
+  # Night hours (when lower rate applies)
+  # Format: start hour (inclusive) to end hour (exclusive)
+  night_start_hour: 22
+  night_end_hour: 6
+
+# ------------------------------------------------------------------------------
+# Smart Charging
+# ------------------------------------------------------------------------------
+smart_charging:
+  # Enable price-based smart charging
+  enabled: true
+  
+  # Maximum price to allow charging (in currency/kWh)
+  # Set to a high value to effectively disable price filtering
+  price_threshold: 1.5
+  
+  # Hours to look ahead for price optimization
+  lookahead_hours: 24
+  
+  # Minimum state of charge target (for future car integration)
+  min_soc_target: 80
+  
+  # Preferred charging hours (0-23)
+  # Charging during these hours gets priority even if not cheapest
+  preferred_hours: [23, 0, 1, 2, 3, 4, 5, 6]
+
+# ------------------------------------------------------------------------------
+# Web Dashboard
+# ------------------------------------------------------------------------------
+web:
+  # Server host (0.0.0.0 for all interfaces, 127.0.0.1 for localhost only)
+  host: "0.0.0.0"
+  
+  # Server port
+  port: 8080
+  
+  # Authentication (recommended if exposed to network)
+  auth:
+    enabled: false
+    username: "admin"
+    password: "changeme"
+
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  
+  # Log file path (leave empty for console only)
+  # Logs auto-rotate every hour, keeping only the last hour of data
+  file: "logs/easee_controller.log"
+
+# ------------------------------------------------------------------------------
+# Solar/Inverter Integration
+# ------------------------------------------------------------------------------
+# Connect to your solar inverter to enable solar-only charging mode
+# Charge your car using only excess solar production
+solar:
+  # Enable solar integration
+  enabled: false
+  
+  # Data source: "saj_cloud", "saj_modbus", "mqtt", or "mock"
+  source: "saj_cloud"
+  
+  # SAJ eSolar Cloud configuration (if source: "saj_cloud")
+  # Works with eop.saj-electric.com / Elekeeper app
+  saj_cloud:
+    # Your eSolar/Elekeeper account credentials
+    username: ""
+    password: ""
+    
+    # Your inverter serial number (find it in the app or on the device)
+    device_sn: ""
+  
+  # SAJ Modbus TCP configuration (if source: "saj_modbus")
+  saj_modbus:
+    # Inverter IP address
+    host: "192.168.1.100"
+    # Modbus port (default: 502)
+    port: 502
+    # Modbus slave ID (default: 1)
+    slave_id: 1
+  
+  # MQTT configuration (if source: "mqtt")
+  # Receive solar data from an external system via MQTT
+  mqtt_topic: "solar/production"
+  
+  # Solar charging settings
+  # Minimum solar power (W) before enabling EV charging
+  min_solar_power_w: 1000
+  
+  # Buffer power (W) to ensure we don't import from grid
+  # EV charging will only use: available_solar - buffer
+  buffer_power_w: 200
+  
+  # How often to check solar production (seconds)
+  update_interval_seconds: 30
+
+# ------------------------------------------------------------------------------
+# Database
+# ------------------------------------------------------------------------------
+database:
+  # SQLite database path for history and statistics
+  path: "data/easee_controller.db"
