@@ -452,7 +452,9 @@ class ChargingFSM:
                 await self._do_detect_phases()
                 await self._evaluate_and_act()
             elif self._context.state == FSMState.CHARGING:
-                await self._transition_to(FSMState.CHARGE_COMPLETE, "Car stopped")
+                # READY_TO_CHARGE can be transient during charger negotiation
+                # Stay in CHARGING - our intent hasn't changed
+                logger.info("FSM: Charger ready_to_charge but staying in CHARGING state (intent unchanged)")
 
         elif new_charger_state == ChargerState.ERROR:
             await self._transition_to(FSMState.ERROR, "Charger error")
