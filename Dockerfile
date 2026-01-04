@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 FROM python:3.11-slim-bookworm AS production
 
 # Labels
-LABEL maintainer="your.email@example.com"
+LABEL maintainer="chester.uu@gmail.com"
 LABEL description="EASEE Smart Charger Controller with price optimization and load balancing"
 LABEL version="1.0.0"
 

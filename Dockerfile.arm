@@ -4,7 +4,7 @@
 FROM python:3.11-slim-bookworm
 
 # Labels
-LABEL maintainer="your.email@example.com"
+LABEL maintainer="chester.uu@gmail.com"
 LABEL description="EASEE Smart Charger Controller - ARM/Raspberry Pi"
 LABEL version="1.0.0"
 
