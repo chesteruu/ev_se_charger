@@ -158,29 +158,62 @@ class LoadMonitor:
         else:
             limiting_phase = "L3"
 
-        # Get EV per-phase current from charger status
-        # Use circuitTotalPhaseConductorCurrentLX for actual L1/L2/L3 phase currents
+        # Get EV current from charger status
+        # Use outputCurrent as the actual EV current (not circuitTotalPhaseConductorCurrentLX
+        # which includes all loads on the circuit, not just EV)
         if charger_status and charger_status.is_charging and charger_status.power_watts > 100:
-            # Use the per-phase currents directly from EASEE API
-            ev_l1 = charger_status.current_l1_amps or 0.0
-            ev_l2 = charger_status.current_l2_amps or 0.0
-            ev_l3 = charger_status.current_l3_amps or 0.0
-            ev_current = ev_l1 + ev_l2 + ev_l3
+            # Use charger's reported output current as the actual EV current
+            ev_current = charger_status.current_amps or 0.0
             
-            # Count active phases (>1A = active)
-            active_phases = sum([1 for x in [ev_l1, ev_l2, ev_l3] if x > 1.0])
+            # Use per-phase circuit currents only to DETECT which phase is active
+            # (these values may include other circuit loads, so don't use them as EV current)
+            circuit_l1 = charger_status.current_l1_amps or 0.0
+            circuit_l2 = charger_status.current_l2_amps or 0.0
+            circuit_l3 = charger_status.current_l3_amps or 0.0
             
-            # Only track phase switches for 1-phase charging
-            # 3-phase charging uses all phases simultaneously, no switching
-            current_ev_phase = None
-            if active_phases == 1:
-                # 1-phase charging - determine which phase
-                if ev_l1 > 1.0:
+            # Determine which phase(s) are active based on relative values
+            # The phase(s) with significant current are the active ones
+            max_circuit = max(circuit_l1, circuit_l2, circuit_l3)
+            
+            # Count active phases (within 50% of max = active for 3-phase)
+            threshold = max_circuit * 0.5 if max_circuit > 1 else 1.0
+            active_phases = sum([1 for x in [circuit_l1, circuit_l2, circuit_l3] if x > threshold])
+            
+            # Distribute EV current to the active phase(s)
+            if active_phases >= 3:
+                # 3-phase charging: distribute evenly
+                ev_per_phase = ev_current / 3
+                ev_l1 = ev_per_phase
+                ev_l2 = ev_per_phase
+                ev_l3 = ev_per_phase
+                current_ev_phase = None
+                self._last_ev_phase = None
+            else:
+                # 1-phase charging: put all current on the active phase
+                ev_l1 = ev_l2 = ev_l3 = 0.0
+                current_ev_phase = None
+                
+                # Find which phase is active (highest circuit current)
+                if circuit_l1 >= circuit_l2 and circuit_l1 >= circuit_l3 and circuit_l1 > 1:
+                    ev_l1 = ev_current
                     current_ev_phase = "L1"
-                elif ev_l2 > 1.0:
+                elif circuit_l2 >= circuit_l1 and circuit_l2 >= circuit_l3 and circuit_l2 > 1:
+                    ev_l2 = ev_current
                     current_ev_phase = "L2"
-                elif ev_l3 > 1.0:
+                elif circuit_l3 > 1:
+                    ev_l3 = ev_current
                     current_ev_phase = "L3"
+                else:
+                    # Fallback: use highest
+                    if circuit_l1 >= circuit_l2 and circuit_l1 >= circuit_l3:
+                        ev_l1 = ev_current
+                        current_ev_phase = "L1"
+                    elif circuit_l2 >= circuit_l3:
+                        ev_l2 = ev_current
+                        current_ev_phase = "L2"
+                    else:
+                        ev_l3 = ev_current
+                        current_ev_phase = "L3"
                 
                 # Detect phase switch (only possible in 1-phase mode)
                 if self._last_ev_phase and current_ev_phase and self._last_ev_phase != current_ev_phase:
@@ -188,13 +221,10 @@ class LoadMonitor:
                     self._phase_switch_time = datetime.now(timezone.utc)
                 
                 self._last_ev_phase = current_ev_phase
-            else:
-                # 3-phase charging or transitioning - reset phase tracking
-                self._last_ev_phase = None
             
             logger.debug(
-                f"EV per-phase from EASEE API: L1={ev_l1:.1f}A, L2={ev_l2:.1f}A, L3={ev_l3:.1f}A "
-                f"(total={ev_current:.1f}A, active_phases={active_phases}, phase={current_ev_phase})"
+                f"EV current: {ev_current:.1f}A on phase {current_ev_phase or 'ALL'}, "
+                f"circuit readings: L1={circuit_l1:.1f}A, L2={circuit_l2:.1f}A, L3={circuit_l3:.1f}A"
             )
             
             is_charging = True
