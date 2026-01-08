@@ -305,6 +305,13 @@ class ChargingFSM:
             elif self._context.state == FSMState.PAUSED_LOAD and not load.should_pause:
                 if self._should_charge_now():
                     logger.info(f"Load protection cleared: resuming (available={load.available_for_ev_amps:.1f}A)")
+                    # Trigger grace period in case charger does a phase switch on resume
+                    detected_phases = self._last_detection_result.detected_phases if self._last_detection_result else 1
+                    if detected_phases == 1:
+                        from .load_monitor import get_load_monitor
+                        lm = get_load_monitor()
+                        if lm:
+                            lm.signal_charger_resumed()
                     await self._do_resume()
                     await self._transition_to(FSMState.CHARGING, "Load protection cleared")
 
@@ -453,15 +460,17 @@ class ChargingFSM:
                 logger.info("FSM: Charger paused but staying in CHARGING state (intent unchanged)")
 
         elif new_charger_state == ChargerState.CHARGING:
-            # Signal load monitor if coming from AWAITING_START (potential phase switch)
+            # Signal load monitor if coming from paused states (potential phase switch)
+            # Charger can go: AWAITING_START -> CHARGING or READY_TO_CHARGE -> CHARGING
             # Only relevant for 1-phase charging - 3-phase doesn't switch phases
-            if old_charger_state == ChargerState.AWAITING_START:
+            if old_charger_state in (ChargerState.AWAITING_START, ChargerState.READY_TO_CHARGE):
                 detected_phases = self._last_detection_result.detected_phases if self._last_detection_result else 1
                 if detected_phases == 1:
                     from .load_monitor import get_load_monitor
                     load_monitor = get_load_monitor()
                     if load_monitor:
                         load_monitor.signal_charger_resumed()
+                        logger.info("FSM: Signaled phase switch grace period (1-phase resumed)")
             
             if self._context.state != FSMState.CHARGING:
                 # If we're already in a paused state, don't keep trying to pause
@@ -552,6 +561,13 @@ class ChargingFSM:
         elif state == FSMState.PAUSED_LOAD:
             if not should_pause_load and should_charge:
                 logger.info("Load protection cleared - resuming charging")
+                # Trigger grace period in case charger does a phase switch on resume
+                detected_phases = self._last_detection_result.detected_phases if self._last_detection_result else 1
+                if detected_phases == 1:
+                    from .load_monitor import get_load_monitor
+                    lm = get_load_monitor()
+                    if lm:
+                        lm.signal_charger_resumed()
                 await self._do_resume()
                 await self._transition_to(FSMState.CHARGING, "Load protection cleared")
 

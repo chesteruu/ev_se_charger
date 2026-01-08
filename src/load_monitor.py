@@ -81,7 +81,7 @@ class LoadMonitor:
     """
 
     MIN_CHARGING_CURRENT = 6.0  # Minimum charging current (A)
-    PHASE_SWITCH_GRACE_SECONDS = 10.0  # Grace period after phase switch
+    PHASE_SWITCH_GRACE_SECONDS = 15.0  # Grace period after phase switch (allow measurements to stabilize)
 
     def __init__(self) -> None:
         config = get_config()
