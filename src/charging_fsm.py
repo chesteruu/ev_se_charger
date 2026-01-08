@@ -147,6 +147,10 @@ class LoadInfo:
     available_for_ev_amps: float = 0.0
     should_pause: bool = False
     recommended_current: float = 0.0
+    # Per-phase available currents for optimal 3-phase charging
+    available_l1_amps: float = 0.0
+    available_l2_amps: float = 0.0
+    available_l3_amps: float = 0.0
 
 
 @dataclass
@@ -260,8 +264,11 @@ class ChargingFSM:
         new_status: ChargerStatus,
     ) -> None:
         """Called by EaseeController when charger state changes."""
+        logger.debug("FSM: on_charger_state_change - waiting for lock...")
         async with self._lock:
+            logger.debug("FSM: on_charger_state_change - lock acquired")
             await self._on_charger_state_change(old_status, new_status)
+            logger.debug("FSM: on_charger_state_change - done, releasing lock")
 
     async def on_schedule_update(self, schedule: ScheduleInfo) -> None:
         """Called by ScheduleProvider when schedule changes."""
@@ -286,7 +293,13 @@ class ChargingFSM:
                     await self._do_pause("Load protection")
                     await self._transition_to(FSMState.PAUSED_LOAD, "Load protection")
                 elif load.recommended_current != self._context.current_limit_amps:
-                    await self._do_set_current(load.recommended_current)
+                    # Pass per-phase currents for optimal 3-phase charging
+                    await self._do_set_current(
+                        load.recommended_current,
+                        current_l1=load.available_l1_amps,
+                        current_l2=load.available_l2_amps,
+                        current_l3=load.available_l3_amps,
+                    )
 
             # Resume from load pause if load is OK
             elif self._context.state == FSMState.PAUSED_LOAD and not load.should_pause:
@@ -303,25 +316,32 @@ class ChargingFSM:
 
         Allows manual start in any mode (user override).
         """
-        async with self._lock:
-            mode = self._context.mode
-            state = self._context.state
+        logger.info("FSM: request_start - waiting for lock...")
+        try:
+            async with asyncio.timeout(15.0):
+                async with self._lock:
+                    logger.info("FSM: request_start - lock acquired")
+                    mode = self._context.mode
+                    state = self._context.state
 
-            # Check preconditions
-            if state == FSMState.IDLE:
-                return {"success": False, "reason": "No car connected"}
+                    # Check preconditions
+                    if state == FSMState.IDLE:
+                        return {"success": False, "reason": "No car connected"}
 
-            if state == FSMState.CHARGING:
-                return {"success": False, "reason": "Already charging"}
+                    if state == FSMState.CHARGING:
+                        return {"success": False, "reason": "Already charging"}
 
-            if state == FSMState.CHARGE_COMPLETE:
-                return {"success": False, "reason": "Charging complete"}
+                    if state == FSMState.CHARGE_COMPLETE:
+                        return {"success": False, "reason": "Charging complete"}
 
-            # Allow manual start in any mode (user override)
-            await self._do_charge()
-            self._context.charging_started_at = datetime.now(timezone.utc)
-            await self._transition_to(FSMState.CHARGING, f"Manual start ({mode.value})")
-            return {"success": True, "reason": f"Started (manual override)"}
+                    # Allow manual start in any mode (user override)
+                    await self._do_charge()
+                    self._context.charging_started_at = datetime.now(timezone.utc)
+                    await self._transition_to(FSMState.CHARGING, f"Manual start ({mode.value})")
+                    return {"success": True, "reason": f"Started (manual override)"}
+        except asyncio.TimeoutError:
+            logger.error("FSM: request_start - timeout waiting for lock (another operation may be stuck)")
+            return {"success": False, "reason": "System busy, try again"}
 
     async def request_stop(self) -> dict:
         """
@@ -330,20 +350,27 @@ class ChargingFSM:
         Works from CHARGING or WAITING_FOR_SCHEDULE states.
         Transitions to PAUSED_USER to prevent schedule from auto-starting.
         """
-        async with self._lock:
-            state = self._context.state
+        logger.info("FSM: request_stop - waiting for lock...")
+        try:
+            async with asyncio.timeout(15.0):
+                async with self._lock:
+                    logger.info("FSM: request_stop - lock acquired")
+                    state = self._context.state
 
-            # Can stop from charging or waiting states
-            if state not in (FSMState.CHARGING, FSMState.WAITING_FOR_SCHEDULE):
-                return {"success": False, "reason": "Not in a stoppable state"}
+                    # Can stop from charging or waiting states
+                    if state not in (FSMState.CHARGING, FSMState.WAITING_FOR_SCHEDULE):
+                        return {"success": False, "reason": "Not in a stoppable state"}
 
-            # If charging, pause the charger
-            if state == FSMState.CHARGING:
-                await self._do_pause("User request")
+                    # If charging, pause the charger
+                    if state == FSMState.CHARGING:
+                        await self._do_pause("User request")
 
-            # Transition to user-paused (prevents schedule from auto-starting)
-            await self._transition_to(FSMState.PAUSED_USER, "User request")
-            return {"success": True, "reason": "Paused by user"}
+                    # Transition to user-paused (prevents schedule from auto-starting)
+                    await self._transition_to(FSMState.PAUSED_USER, "User request")
+                    return {"success": True, "reason": "Paused by user"}
+        except asyncio.TimeoutError:
+            logger.error("FSM: request_stop - timeout waiting for lock")
+            return {"success": False, "reason": "System busy, try again"}
 
     async def request_resume(self) -> dict:
         """
@@ -352,23 +379,30 @@ class ChargingFSM:
         In SMART mode: Returns to WAITING_FOR_SCHEDULE (schedule takes over)
         In MANUAL mode: Starts charging immediately
         """
-        async with self._lock:
-            state = self._context.state
-            mode = self._context.mode
+        logger.info("FSM: request_resume - waiting for lock...")
+        try:
+            async with asyncio.timeout(15.0):
+                async with self._lock:
+                    logger.info("FSM: request_resume - lock acquired")
+                    state = self._context.state
+                    mode = self._context.mode
 
-            if state != FSMState.PAUSED_USER:
-                return {"success": False, "reason": "Not in user-paused state"}
+                    if state != FSMState.PAUSED_USER:
+                        return {"success": False, "reason": "Not in user-paused state"}
 
-            if mode == ChargingMode.MANUAL:
-                # Manual mode: start charging immediately
-                await self._do_charge()
-                self._context.charging_started_at = datetime.now(timezone.utc)
-                await self._transition_to(FSMState.CHARGING, "Manual resume")
-                return {"success": True, "reason": "Resumed charging"}
+                    if mode == ChargingMode.MANUAL:
+                        # Manual mode: start charging immediately
+                        await self._do_charge()
+                        self._context.charging_started_at = datetime.now(timezone.utc)
+                        await self._transition_to(FSMState.CHARGING, "Manual resume")
+                        return {"success": True, "reason": "Resumed charging"}
 
-            # SMART mode: return to waiting for schedule
-            await self._transition_to(FSMState.WAITING_FOR_SCHEDULE, "User resumed - schedule takes over")
-            return {"success": True, "reason": "Resumed - schedule will control charging"}
+                    # SMART mode: return to waiting for schedule
+                    await self._transition_to(FSMState.WAITING_FOR_SCHEDULE, "User resumed - schedule takes over")
+                    return {"success": True, "reason": "Resumed - schedule will control charging"}
+        except asyncio.TimeoutError:
+            logger.error("FSM: request_resume - timeout waiting for lock")
+            return {"success": False, "reason": "System busy, try again"}
 
     # =========================================================================
     # INTERNAL FSM LOGIC
@@ -418,6 +452,16 @@ class ChargingFSM:
 
         elif new_charger_state == ChargerState.CHARGING:
             if self._context.state != FSMState.CHARGING:
+                # If we're already in a paused state, don't keep trying to pause
+                # The charger just hasn't stopped yet - wait for it
+                if self._context.state in (
+                    FSMState.PAUSED_USER,
+                    FSMState.PAUSED_SCHEDULE,
+                    FSMState.PAUSED_LOAD,
+                ):
+                    logger.debug("FSM: Charger still charging but pause already issued, waiting...")
+                    return
+
                 # Check if we should actually be charging (schedule/mode)
                 should_charge = self._should_charge_now()
 
@@ -575,8 +619,14 @@ class ChargingFSM:
         except Exception as e:
             logger.error(f"FSM: Failed to stop: {e}")
 
-    async def _do_set_current(self, current: float) -> None:
-        """Set charging current with detected phase information."""
+    async def _do_set_current(
+        self, 
+        current: float,
+        current_l1: float | None = None,
+        current_l2: float | None = None,
+        current_l3: float | None = None,
+    ) -> None:
+        """Set charging current with detected phase information and per-phase limits."""
         try:
             current = max(self.MIN_CHARGING_CURRENT, current)
             if abs(current - self._context.current_limit_amps) >= 1.0:
@@ -584,7 +634,19 @@ class ChargingFSM:
                 phases = 1
                 if self._last_detection_result:
                     phases = self._last_detection_result.detected_phases
-                success = await self._charger.do_set_current(current, phases=phases)
+                
+                # For 3-phase, pass per-phase currents for optimal power
+                if phases >= 3 and current_l1 is not None:
+                    success = await self._charger.do_set_current(
+                        current, 
+                        phases=phases,
+                        current_l1=current_l1,
+                        current_l2=current_l2,
+                        current_l3=current_l3,
+                    )
+                else:
+                    success = await self._charger.do_set_current(current, phases=phases)
+                
                 if success:
                     self._context.current_limit_amps = current
         except Exception as e:

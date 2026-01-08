@@ -54,14 +54,17 @@ class LoadStatus:
     home_current_amps: float
     ev_current_amps: float
     total_current_amps: float
-    current_l1_amps: float
+    current_l1_amps: float  # Total (including EV)
     current_l2_amps: float
     current_l3_amps: float
-    limiting_phase: str
-    available_for_ev_amps: float
-    utilization_percent: float
-    should_pause: bool
-    recommended_current: float
+    home_l1_amps: float = 0.0  # Home only (EV excluded)
+    home_l2_amps: float = 0.0
+    home_l3_amps: float = 0.0
+    limiting_phase: str = ""
+    available_for_ev_amps: float = 0.0
+    utilization_percent: float = 0.0
+    should_pause: bool = False
+    recommended_current: float = 0.0
 
 
 class LoadMonitor:
@@ -140,52 +143,76 @@ class LoadMonitor:
         else:
             limiting_phase = "L3"
 
-        # Get EV current (for subtraction) - use ACTUAL current, not limit
+        # Get EV per-phase currents from charger status
+        # This tells us EXACTLY how much current EV is drawing on each phase
         if charger_status and charger_status.is_charging:
-            # Use actual measured current from charger
-            # If power is available, calculate current from power (more accurate)
-            if charger_status.power_watts > 100:  # Only if actually drawing power
-                voltage = charger_status.voltage_volts or 230
-                ev_current = charger_status.power_watts / voltage
-            else:
-                ev_current = charger_status.current_amps
+            ev_l1 = charger_status.current_l1_amps
+            ev_l2 = charger_status.current_l2_amps
+            ev_l3 = charger_status.current_l3_amps
+            ev_current = ev_l1 + ev_l2 + ev_l3  # Total for display
             is_charging = True
         else:
+            ev_l1 = ev_l2 = ev_l3 = 0.0
             ev_current = 0.0
             is_charging = False
 
-        # Calculate home load (phase readings include EV)
-        # EV is on the phase with highest current - subtract EV only from that phase
-        if is_charging and ev_current > 0:
-            # Find which phase the EV is on (highest current phase)
-            if limiting_phase == "L1":
-                home_l1 = max(0, current_l1 - ev_current)
-                home_l2 = current_l2
-                home_l3 = current_l3
-            elif limiting_phase == "L2":
-                home_l1 = current_l1
-                home_l2 = max(0, current_l2 - ev_current)
-                home_l3 = current_l3
-            else:  # L3
-                home_l1 = current_l1
-                home_l2 = current_l2
-                home_l3 = max(0, current_l3 - ev_current)
-
-            # Home load is the max of all phases AFTER subtracting EV from its phase
-            home_current = max(home_l1, home_l2, home_l3)
-        else:
-            home_current = max_phase_current
+        # Calculate home load by subtracting EV from EACH phase
+        # SaveEye measures total home including EV, so we need to subtract EV per-phase
+        home_l1 = max(0, current_l1 - ev_l1)
+        home_l2 = max(0, current_l2 - ev_l2)
+        home_l3 = max(0, current_l3 - ev_l3)
+        
+        # Home current is the max phase (for display/general info)
+        home_current = max(home_l1, home_l2, home_l3)
+        
+        # Debug log for verification
+        if is_charging:
+            logger.debug(
+                f"Load calc: SaveEye[L1={current_l1:.1f}A, L2={current_l2:.1f}A, L3={current_l3:.1f}A] "
+                f"- EV[L1={ev_l1:.1f}A, L2={ev_l2:.1f}A, L3={ev_l3:.1f}A] "
+                f"= Home[L1={home_l1:.1f}A, L2={home_l2:.1f}A, L3={home_l3:.1f}A]"
+            )
 
         # Calculate utilization
         utilization = max_phase_current / self._fuse_limit
 
-        # Calculate available for EV
-        available_for_ev = max(0, self._effective_limit - home_current)
+        # Calculate per-phase available currents (always needed for optimal 3-phase)
+        avail_l1 = max(0, self._effective_limit - home_l1)
+        avail_l2 = max(0, self._effective_limit - home_l2)
+        avail_l3 = max(0, self._effective_limit - home_l3)
+        
+        if is_charging:
+            logger.debug(
+                f"Available: limit={self._effective_limit}A - Home => "
+                f"Avail[L1={avail_l1:.1f}A, L2={avail_l2:.1f}A, L3={avail_l3:.1f}A]"
+            )
 
-        # Should pause? Only if available < minimum
+        # Determine which phase(s) EV is using and calculate available accordingly
+        # For 1-phase: only the EV's phase matters
+        # For 3-phase: use per-phase limits (charger can set different current per phase)
+        ev_phases_active = sum([1 for x in [ev_l1, ev_l2, ev_l3] if x > 0.5])
+        
+        if ev_phases_active == 0:
+            # Not charging or unknown - use max home load (conservative)
+            available_for_ev = max(0, self._effective_limit - home_current)
+        elif ev_phases_active == 1:
+            # 1-phase charging: calculate available on EV's specific phase
+            if ev_l1 > 0.5:
+                available_for_ev = avail_l1
+            elif ev_l2 > 0.5:
+                available_for_ev = avail_l2
+            else:  # ev_l3 > 0.5
+                available_for_ev = avail_l3
+        else:
+            # 3-phase charging: for recommended_current, use minimum (safe default)
+            # But we also pass per-phase limits for optimal control
+            available_for_ev = min(avail_l1, avail_l2, avail_l3)
+
+        # Should pause? Only if ALL phases below minimum (for 3-phase)
+        # or EV's phase below minimum (for 1-phase)
         should_pause = available_for_ev < self.MIN_CHARGING_CURRENT
 
-        # Recommended current
+        # Recommended current (minimum of phases for safety)
         recommended = min(available_for_ev, self._max_ev_current)
 
         # Create status
@@ -197,6 +224,9 @@ class LoadMonitor:
             current_l1_amps=current_l1,
             current_l2_amps=current_l2,
             current_l3_amps=current_l3,
+            home_l1_amps=home_l1,
+            home_l2_amps=home_l2,
+            home_l3_amps=home_l3,
             limiting_phase=limiting_phase,
             available_for_ev_amps=available_for_ev,
             utilization_percent=utilization * 100,
@@ -220,6 +250,9 @@ class LoadMonitor:
                     available_for_ev_amps=available_for_ev,
                     should_pause=should_pause,
                     recommended_current=recommended,
+                    available_l1_amps=min(avail_l1, self._max_ev_current),
+                    available_l2_amps=min(avail_l2, self._max_ev_current),
+                    available_l3_amps=min(avail_l3, self._max_ev_current),
                 )
                 for consumer in self._consumers:
                     try:
@@ -257,7 +290,14 @@ class LoadMonitor:
             "home_current_amps": s.home_current_amps,
             "ev_current_amps": s.ev_current_amps,
             "total_current_amps": s.total_current_amps,
+            # Home-only per-phase (EV excluded) - use this for display
             "phases": {
+                "l1": s.home_l1_amps,
+                "l2": s.home_l2_amps,
+                "l3": s.home_l3_amps,
+            },
+            # Total per-phase (including EV) - for reference
+            "phases_total": {
                 "l1": s.current_l1_amps,
                 "l2": s.current_l2_amps,
                 "l3": s.current_l3_amps,

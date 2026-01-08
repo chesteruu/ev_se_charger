@@ -105,6 +105,10 @@ class ChargerStatus:
     raw_data: dict[str, Any]
     output_phase: int = 0  # Number of phases in use (0=none, 1=single, 3=three)
     session_start: datetime | None = None  # Session start time from EASEE API
+    # Per-phase output currents from charger (for accurate load calculation)
+    current_l1_amps: float = 0.0
+    current_l2_amps: float = 0.0
+    current_l3_amps: float = 0.0
 
     @property
     def is_charging(self) -> bool:
@@ -175,6 +179,7 @@ class EaseeController:
         self._easee: Easee | None = None
         self._charger: Charger | None = None
         self._site: Site | None = None
+        self._circuit: Circuit | None = None
         self._connected = False
         self._last_status: ChargerStatus | None = None
 
@@ -228,8 +233,9 @@ class EaseeController:
                     
                     for charger_data in circuit_data.get("chargers", []):
                         if charger_data.get("id") == self._charger_id:
-                            # Create Charger with site AND circuit for dynamic current control
+                            # Store site and circuit for dynamic current control
                             self._site = site_obj
+                            self._circuit = circuit_obj
                             self._charger = Charger(charger_data, self._easee, site=site_obj, circuit=circuit_obj)
                             self._connected = True
                             logger.info(f"Connected to charger {self._charger_id} (site: {site_obj.name}, circuit: {circuit_obj.id})")
@@ -287,6 +293,11 @@ class EaseeController:
             except (ValueError, AttributeError) as e:
                 logger.warning(f"Failed to parse sessionStart '{session_start_str}': {e}")
 
+        # Per-phase output currents (T2=L1, T3=L2, T4=L3 in EASEE API)
+        ev_current_l1 = state.get("inCurrentT2", 0) or 0
+        ev_current_l2 = state.get("inCurrentT3", 0) or 0
+        ev_current_l3 = state.get("inCurrentT4", 0) or 0
+
         status = ChargerStatus(
             state=ChargerState.from_api_state(state.get("chargerOpMode", 1)),
             is_online=state.get("isOnline", False),
@@ -303,6 +314,9 @@ class EaseeController:
             raw_data=state,
             output_phase=state.get("outputPhase", 0),
             session_start=session_start_dt,
+            current_l1_amps=ev_current_l1,
+            current_l2_amps=ev_current_l2,
+            current_l3_amps=ev_current_l3,
         )
 
         self._last_status = status
@@ -440,23 +454,38 @@ class EaseeController:
         try:
             logger.info(f"do_charge: Starting at {start_current}A ({phases}-phase)")
 
-            # Set initial current per phase using circuit-level control
-            await self._charger.set_dynamic_charger_circuit_current(
-                currentP1=start_current,
-                currentP2=start_current,
-                currentP3=start_current
-            )
+            # Set dynamic current on circuit level (if circuit available)
+            if self._circuit:
+                try:
+                    await asyncio.wait_for(
+                        self._circuit.set_dynamic_current(
+                            currentP1=start_current,
+                            currentP2=start_current,
+                            currentP3=start_current
+                        ),
+                        timeout=5.0
+                    )
+                    logger.info(f"do_charge: Circuit dynamic current set to {start_current}A")
+                except asyncio.TimeoutError:
+                    logger.warning("do_charge: set_dynamic_current timed out, continuing with start")
+                except Exception as e:
+                    logger.warning(f"do_charge: set_dynamic_current failed: {e}, continuing with start")
+            else:
+                logger.warning("do_charge: No circuit available, skipping dynamic current")
 
             # Override any schedule
             try:
-                await self._charger.override_schedule()
+                await asyncio.wait_for(self._charger.override_schedule(), timeout=5.0)
             except Exception:
                 pass
 
             # Start charging
-            await self._charger.start()
+            await asyncio.wait_for(self._charger.start(), timeout=10.0)
             return True
 
+        except asyncio.TimeoutError:
+            logger.error("do_charge: start command timed out")
+            return False
         except Exception as e:
             logger.error(f"do_charge failed: {e}")
             return False
@@ -473,8 +502,11 @@ class EaseeController:
 
         try:
             logger.info("do_pause: Pausing charging")
-            await self._charger.pause()
+            await asyncio.wait_for(self._charger.pause(), timeout=10.0)
             return True
+        except asyncio.TimeoutError:
+            logger.error("do_pause: timed out")
+            return False
         except Exception as e:
             logger.error(f"do_pause failed: {e}")
             return False
@@ -491,8 +523,11 @@ class EaseeController:
 
         try:
             logger.info("do_resume: Resuming charging")
-            await self._charger.resume()
+            await asyncio.wait_for(self._charger.resume(), timeout=10.0)
             return True
+        except asyncio.TimeoutError:
+            logger.error("do_resume: timed out")
+            return False
         except Exception as e:
             logger.error(f"do_resume failed: {e}")
             return False
@@ -509,22 +544,34 @@ class EaseeController:
 
         try:
             logger.info("do_stop: Stopping charging")
-            await self._charger.stop()
+            await asyncio.wait_for(self._charger.stop(), timeout=10.0)
             return True
+        except asyncio.TimeoutError:
+            logger.error("do_stop: timed out")
+            return False
         except Exception as e:
             logger.error(f"do_stop failed: {e}")
             return False
 
-    async def do_set_current(self, current: float, phases: int = 1) -> bool:
+    async def do_set_current(
+        self, 
+        current: float, 
+        phases: int = 1,
+        current_l1: float | None = None,
+        current_l2: float | None = None,
+        current_l3: float | None = None,
+    ) -> bool:
         """
         Set charging current using dynamic circuit current for best utilization.
 
-        Uses set_dynamic_charger_circuit_current to set current per phase,
-        allowing the charger to use the full allocated current on each active phase.
+        For 3-phase charging, can set different limits per phase for optimal power.
 
         Args:
-            current: Target current in amps (per phase)
+            current: Default current in amps (used if per-phase not specified)
             phases: Number of phases the car is using (1 or 3)
+            current_l1: Optional per-phase limit for L1
+            current_l2: Optional per-phase limit for L2
+            current_l3: Optional per-phase limit for L3
 
         Returns:
             True if command sent successfully
@@ -533,28 +580,32 @@ class EaseeController:
             raise RuntimeError("Not connected to EASEE")
 
         # Clamp to valid range and convert to integer (Easee API requires int)
-        current = int(max(self.MIN_CURRENT, min(current, self._max_current)))
+        def clamp(val: float) -> int:
+            return int(max(self.MIN_CURRENT, min(val, self._max_current)))
+
+        # Use per-phase currents if provided, otherwise use default
+        p1 = clamp(current_l1 if current_l1 is not None else current)
+        p2 = clamp(current_l2 if current_l2 is not None else current)
+        p3 = clamp(current_l3 if current_l3 is not None else current)
+
+        if not self._circuit:
+            logger.warning("do_set_current: No circuit available")
+            return False
 
         try:
-            # Set current per phase - give each phase the full available current
-            # The charger will only use the phases the car supports
-            if phases >= 3:
-                # 3-phase: set all phases to the same current
-                logger.info(f"Setting charging current to {current}A on all 3 phases")
-                await self._charger.set_dynamic_charger_circuit_current(
-                    currentP1=current,
-                    currentP2=current,
-                    currentP3=current
-                )
-            else:
-                # 1-phase: give full current to P1, also set P2/P3 in case charger uses them
-                logger.info(f"Setting charging current to {current}A (1-phase mode)")
-                await self._charger.set_dynamic_charger_circuit_current(
-                    currentP1=current,
-                    currentP2=current,
-                    currentP3=current
-                )
+            logger.info(f"Setting circuit dynamic current: P1={p1}A, P2={p2}A, P3={p3}A")
+            await asyncio.wait_for(
+                self._circuit.set_dynamic_current(
+                    currentP1=p1,
+                    currentP2=p2,
+                    currentP3=p3
+                ),
+                timeout=5.0
+            )
             return True
+        except asyncio.TimeoutError:
+            logger.error("do_set_current: timed out")
+            return False
         except Exception as e:
             logger.error(f"do_set_current failed: {e}")
             return False
