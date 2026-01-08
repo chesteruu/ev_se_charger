@@ -81,6 +81,7 @@ class LoadMonitor:
     """
 
     MIN_CHARGING_CURRENT = 6.0  # Minimum charging current (A)
+    PHASE_SWITCH_GRACE_SECONDS = 10.0  # Grace period after phase switch
 
     def __init__(self) -> None:
         config = get_config()
@@ -98,6 +99,10 @@ class LoadMonitor:
         # Smoothing
         self._reading_history: list[float] = []
         self._history_size = 5
+        
+        # Phase switch tracking - to handle phase switches gracefully
+        self._last_ev_phase: str | None = None  # "L1", "L2", "L3", or None
+        self._phase_switch_time: datetime | None = None
 
     def add_consumer(self, consumer: LoadConsumer) -> None:
         """Add a load consumer (e.g., FSM)."""
@@ -111,6 +116,16 @@ class LoadMonitor:
     def set_ev_limit(self, current: float) -> None:
         """Update the current EV charging limit (for calculations)."""
         self._current_ev_limit = current
+
+    def signal_charger_resumed(self) -> None:
+        """
+        Signal that the charger just resumed from pause/awaiting state.
+        
+        This triggers a grace period to avoid false load protection
+        due to stale SaveEye readings during phase switches.
+        """
+        logger.info("Charger resumed - starting phase switch grace period")
+        self._phase_switch_time = datetime.now(timezone.utc)
 
     async def on_power_reading(
         self,
@@ -143,21 +158,54 @@ class LoadMonitor:
         else:
             limiting_phase = "L3"
 
-        # Get EV per-phase currents from charger status
-        # This tells us EXACTLY how much current EV is drawing on each phase
-        if charger_status and charger_status.is_charging:
-            ev_l1 = charger_status.current_l1_amps
-            ev_l2 = charger_status.current_l2_amps
-            ev_l3 = charger_status.current_l3_amps
-            ev_current = ev_l1 + ev_l2 + ev_l3  # Total for display
+        # Get EV per-phase current from charger status
+        # Use circuitTotalPhaseConductorCurrentLX for actual L1/L2/L3 phase currents
+        if charger_status and charger_status.is_charging and charger_status.power_watts > 100:
+            # Use the per-phase currents directly from EASEE API
+            ev_l1 = charger_status.current_l1_amps or 0.0
+            ev_l2 = charger_status.current_l2_amps or 0.0
+            ev_l3 = charger_status.current_l3_amps or 0.0
+            ev_current = ev_l1 + ev_l2 + ev_l3
+            
+            # Count active phases (>1A = active)
+            active_phases = sum([1 for x in [ev_l1, ev_l2, ev_l3] if x > 1.0])
+            
+            # Only track phase switches for 1-phase charging
+            # 3-phase charging uses all phases simultaneously, no switching
+            current_ev_phase = None
+            if active_phases == 1:
+                # 1-phase charging - determine which phase
+                if ev_l1 > 1.0:
+                    current_ev_phase = "L1"
+                elif ev_l2 > 1.0:
+                    current_ev_phase = "L2"
+                elif ev_l3 > 1.0:
+                    current_ev_phase = "L3"
+                
+                # Detect phase switch (only possible in 1-phase mode)
+                if self._last_ev_phase and current_ev_phase and self._last_ev_phase != current_ev_phase:
+                    logger.info(f"1-phase switch detected: {self._last_ev_phase} -> {current_ev_phase}")
+                    self._phase_switch_time = datetime.now(timezone.utc)
+                
+                self._last_ev_phase = current_ev_phase
+            else:
+                # 3-phase charging or transitioning - reset phase tracking
+                self._last_ev_phase = None
+            
+            logger.debug(
+                f"EV per-phase from EASEE API: L1={ev_l1:.1f}A, L2={ev_l2:.1f}A, L3={ev_l3:.1f}A "
+                f"(total={ev_current:.1f}A, active_phases={active_phases}, phase={current_ev_phase})"
+            )
+            
             is_charging = True
         else:
             ev_l1 = ev_l2 = ev_l3 = 0.0
             ev_current = 0.0
             is_charging = False
+            # Reset phase tracking when not charging
+            self._last_ev_phase = None
 
-        # Calculate home load by subtracting EV from EACH phase
-        # SaveEye measures total home including EV, so we need to subtract EV per-phase
+        # Calculate home load by subtracting EV from detected phase(s)
         home_l1 = max(0, current_l1 - ev_l1)
         home_l2 = max(0, current_l2 - ev_l2)
         home_l3 = max(0, current_l3 - ev_l3)
@@ -188,13 +236,13 @@ class LoadMonitor:
             )
 
         # Determine which phase(s) EV is using and calculate available accordingly
-        # For 1-phase: only the EV's phase matters
-        # For 3-phase: use per-phase limits (charger can set different current per phase)
+        # For 1-phase: only the EV's active phase matters
+        # For 3-phase: minimum available across all phases
         ev_phases_active = sum([1 for x in [ev_l1, ev_l2, ev_l3] if x > 0.5])
         
         if ev_phases_active == 0:
-            # Not charging or unknown - use max home load (conservative)
-            available_for_ev = max(0, self._effective_limit - home_current)
+            # Not charging - use minimum available (conservative, we don't know which phase will be used)
+            available_for_ev = min(avail_l1, avail_l2, avail_l3)
         elif ev_phases_active == 1:
             # 1-phase charging: calculate available on EV's specific phase
             if ev_l1 > 0.5:
@@ -211,6 +259,19 @@ class LoadMonitor:
         # Should pause? Only if ALL phases below minimum (for 3-phase)
         # or EV's phase below minimum (for 1-phase)
         should_pause = available_for_ev < self.MIN_CHARGING_CURRENT
+        
+        # Grace period after phase switch - don't trigger load protection
+        # SaveEye readings may be stale, causing false positives
+        if should_pause and self._phase_switch_time:
+            elapsed = (datetime.now(timezone.utc) - self._phase_switch_time).total_seconds()
+            if elapsed < self.PHASE_SWITCH_GRACE_SECONDS:
+                logger.info(
+                    f"Phase switch grace period: {elapsed:.1f}s < {self.PHASE_SWITCH_GRACE_SECONDS}s, "
+                    f"ignoring low available ({available_for_ev:.1f}A)"
+                )
+                should_pause = False
+                # Use minimum charging current during grace period
+                available_for_ev = max(available_for_ev, self.MIN_CHARGING_CURRENT)
 
         # Recommended current (minimum of phases for safety)
         recommended = min(available_for_ev, self._max_ev_current)

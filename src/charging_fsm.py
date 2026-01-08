@@ -304,7 +304,9 @@ class ChargingFSM:
             # Resume from load pause if load is OK
             elif self._context.state == FSMState.PAUSED_LOAD and not load.should_pause:
                 if self._should_charge_now():
+                    logger.info(f"Load protection cleared: resuming (available={load.available_for_ev_amps:.1f}A)")
                     await self._do_resume()
+                    await self._transition_to(FSMState.CHARGING, "Load protection cleared")
 
     # =========================================================================
     # EXTERNAL REQUESTS - Generic methods, FSM decides based on state + mode
@@ -451,6 +453,16 @@ class ChargingFSM:
                 logger.info("FSM: Charger paused but staying in CHARGING state (intent unchanged)")
 
         elif new_charger_state == ChargerState.CHARGING:
+            # Signal load monitor if coming from AWAITING_START (potential phase switch)
+            # Only relevant for 1-phase charging - 3-phase doesn't switch phases
+            if old_charger_state == ChargerState.AWAITING_START:
+                detected_phases = self._last_detection_result.detected_phases if self._last_detection_result else 1
+                if detected_phases == 1:
+                    from .load_monitor import get_load_monitor
+                    load_monitor = get_load_monitor()
+                    if load_monitor:
+                        load_monitor.signal_charger_resumed()
+            
             if self._context.state != FSMState.CHARGING:
                 # If we're already in a paused state, don't keep trying to pause
                 # The charger just hasn't stopped yet - wait for it
@@ -539,11 +551,15 @@ class ChargingFSM:
 
         elif state == FSMState.PAUSED_LOAD:
             if not should_pause_load and should_charge:
+                logger.info("Load protection cleared - resuming charging")
                 await self._do_resume()
+                await self._transition_to(FSMState.CHARGING, "Load protection cleared")
 
         elif state == FSMState.PAUSED_SCHEDULE:
             if should_charge and not should_pause_load:
+                logger.info("Schedule window opened - resuming charging")
                 await self._do_resume()
+                await self._transition_to(FSMState.CHARGING, "Schedule resumed")
 
         elif state == FSMState.PAUSED_USER:
             # User pause - only manual mode can auto-resume
@@ -630,22 +646,59 @@ class ChargingFSM:
         try:
             current = max(self.MIN_CHARGING_CURRENT, current)
             if abs(current - self._context.current_limit_amps) >= 1.0:
-                # Get detected phases (default to 1 if unknown)
+                # Get detected phases and which phase EV is on
                 phases = 1
+                ev_phase = None  # Which phase(s) EV is actually using
+                
                 if self._last_detection_result:
                     phases = self._last_detection_result.detected_phases
                 
-                # For 3-phase, pass per-phase currents for optimal power
-                if phases >= 3 and current_l1 is not None:
-                    success = await self._charger.do_set_current(
-                        current, 
-                        phases=phases,
-                        current_l1=current_l1,
-                        current_l2=current_l2,
-                        current_l3=current_l3,
-                    )
+                # Determine which phase EV is on from charger status
+                charger_status = self._charger.last_status
+                if charger_status and charger_status.is_charging:
+                    l1 = charger_status.current_l1_amps or 0
+                    l2 = charger_status.current_l2_amps or 0
+                    l3 = charger_status.current_l3_amps or 0
+                    # EV is on the phase with significant current (>1A)
+                    if l1 > 1: ev_phase = "L1"
+                    elif l2 > 1: ev_phase = "L2"
+                    elif l3 > 1: ev_phase = "L3"
+                
+                # Set per-phase currents based on charging type
+                max_current = self._charger.max_current
+                
+                if phases >= 3:
+                    # 3-phase: set each phase to its available current
+                    p1 = current_l1 if current_l1 is not None else current
+                    p2 = current_l2 if current_l2 is not None else current
+                    p3 = current_l3 if current_l3 is not None else current
+                    logger.info(f"FSM: Setting 3-phase current: L1={p1:.0f}A, L2={p2:.0f}A, L3={p3:.0f}A")
                 else:
-                    success = await self._charger.do_set_current(current, phases=phases)
+                    # 1-phase: only limit the EV's phase, set others to max
+                    if ev_phase == "L1" and current_l1 is not None:
+                        p1 = current_l1
+                        p2 = max_current
+                        p3 = max_current
+                    elif ev_phase == "L2" and current_l2 is not None:
+                        p1 = max_current
+                        p2 = current_l2
+                        p3 = max_current
+                    elif ev_phase == "L3" and current_l3 is not None:
+                        p1 = max_current
+                        p2 = max_current
+                        p3 = current_l3
+                    else:
+                        # Unknown phase - set all to same (conservative)
+                        p1 = p2 = p3 = current
+                    logger.info(f"FSM: Setting 1-phase ({ev_phase}) current: L1={p1:.0f}A, L2={p2:.0f}A, L3={p3:.0f}A")
+                
+                success = await self._charger.do_set_current(
+                    current, 
+                    phases=phases,
+                    current_l1=p1,
+                    current_l2=p2,
+                    current_l3=p3,
+                )
                 
                 if success:
                     self._context.current_limit_amps = current

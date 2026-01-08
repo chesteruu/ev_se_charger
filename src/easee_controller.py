@@ -293,10 +293,19 @@ class EaseeController:
             except (ValueError, AttributeError) as e:
                 logger.warning(f"Failed to parse sessionStart '{session_start_str}': {e}")
 
-        # Per-phase output currents (T2=L1, T3=L2, T4=L3 in EASEE API)
-        ev_current_l1 = state.get("inCurrentT2", 0) or 0
-        ev_current_l2 = state.get("inCurrentT3", 0) or 0
-        ev_current_l3 = state.get("inCurrentT4", 0) or 0
+        # Per-phase output currents - use circuitTotalPhaseConductorCurrentLX
+        # NOT inCurrentT2/T3/T4 which are terminal currents (wiring-dependent)
+        # circuitTotalPhaseConductorCurrentLX are the actual L1/L2/L3 phase currents
+        ev_current_l1 = state.get("circuitTotalPhaseConductorCurrentL1", 0) or 0
+        ev_current_l2 = state.get("circuitTotalPhaseConductorCurrentL2", 0) or 0
+        ev_current_l3 = state.get("circuitTotalPhaseConductorCurrentL3", 0) or 0
+        
+        # Log raw per-phase currents for debugging
+        if state.get("chargerOpMode", 0) == 3:  # Only log when CHARGING
+            logger.info(
+                f"EASEE per-phase currents: L1={ev_current_l1:.1f}A, L2={ev_current_l2:.1f}A, "
+                f"L3={ev_current_l3:.1f}A (outputCurrent={state.get('outputCurrent', 0)}A)"
+            )
 
         status = ChargerStatus(
             state=ChargerState.from_api_state(state.get("chargerOpMode", 1)),
@@ -649,10 +658,10 @@ class EaseeController:
             output_phase_raw = state.get("outputPhase", 0)
             output_current = state.get("outputCurrent", 0)
 
-            # Get per-phase current measurements (T2=L1, T3=L2, T4=L3)
-            current_l1 = state.get("inCurrentT2", 0) or 0
-            current_l2 = state.get("inCurrentT3", 0) or 0
-            current_l3 = state.get("inCurrentT4", 0) or 0
+            # Get per-phase current measurements (actual L1/L2/L3, not terminal currents)
+            current_l1 = state.get("circuitTotalPhaseConductorCurrentL1", 0) or 0
+            current_l2 = state.get("circuitTotalPhaseConductorCurrentL2", 0) or 0
+            current_l3 = state.get("circuitTotalPhaseConductorCurrentL3", 0) or 0
 
             logger.info(
                 f"do_detect_phases: raw state - outputPhase={output_phase_raw}, "
