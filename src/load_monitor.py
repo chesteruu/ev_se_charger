@@ -1,14 +1,18 @@
 """
 Load Monitor Module.
 
-This module monitors home electrical load and calculates available capacity for EV charging.
-It does NOT control charging directly - it provides load information via callback.
+This module monitors home electrical load and controls EV charging current.
 
 Architecture:
 - Receives power readings from SaveEye monitor
 - Calculates home load and available EV capacity
-- Notifies consumers of load changes
-- Does NOT know about FSM or charger control
+- DIRECTLY sets charging current via CurrentController
+- Notifies FSM only about should_pause signal (not current values)
+
+Separation of concerns:
+- LoadMonitor: Owns current calculation and adjustment
+- FSM: Owns charging lifecycle (start/stop/pause)
+- ChargerController: Executes commands
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from .config import get_config
 
 if TYPE_CHECKING:
     from .charging_fsm import LoadInfo
-    from .easee_controller import ChargerStatus
+    from .charging_fsm_base import ChargerStatus, CurrentController
     from .saveeye_monitor import PowerReading
 
 
@@ -34,13 +38,14 @@ if TYPE_CHECKING:
 @runtime_checkable
 class LoadConsumer(Protocol):
     """
-    Interface for load consumers.
+    Interface for load consumers (FSM).
 
-    LoadMonitor doesn't care who implements this - just calls it.
+    LoadMonitor notifies FSM only about should_pause signal.
+    Current adjustment is handled internally by LoadMonitor.
     """
 
     async def on_load_update(self, load: LoadInfo) -> None:
-        """Called when load changes significantly."""
+        """Called when should_pause status changes."""
         ...
 
 logger = logging.getLogger(__name__)
@@ -69,19 +74,18 @@ class LoadStatus:
 
 class LoadMonitor:
     """
-    Monitors home load and calculates EV charging capacity.
+    Monitors home load and controls EV charging current.
 
-    This class:
+    Responsibilities:
     - Receives power readings from SaveEye
     - Calculates home load (excluding EV)
-    - Calculates available capacity for EV
-    - Notifies consumers of load changes via callback
-
-    It does NOT know about FSM or charger control.
+    - Calculates available capacity for EV per phase
+    - DIRECTLY sets charging current via CurrentController
+    - Notifies FSM only about should_pause (not current values)
     """
 
     MIN_CHARGING_CURRENT = 6.0  # Minimum charging current (A)
-    PHASE_SWITCH_GRACE_SECONDS = 15.0  # Grace period after phase switch (allow measurements to stabilize)
+    PHASE_SWITCH_GRACE_SECONDS = 15.0  # Grace period after phase switch
 
     def __init__(self) -> None:
         config = get_config()
@@ -92,30 +96,39 @@ class LoadMonitor:
         self._max_ev_current = config.easee.max_current
 
         self._consumers: list[LoadConsumer] = []
+        self._current_controller: CurrentController | None = None
         self._last_status: LoadStatus | None = None
-        self._current_ev_limit: float = self._max_ev_current
+        self._last_set_current: float = 0.0  # Track what we last set
         self._running = False
 
         # Smoothing
         self._reading_history: list[float] = []
         self._history_size = 5
         
-        # Phase switch tracking - to handle phase switches gracefully
-        self._last_ev_phase: str | None = None  # "L1", "L2", "L3", or None
+        # Phase switch tracking
+        self._last_ev_phase: str | None = None
         self._phase_switch_time: datetime | None = None
+        
+        # Detected phases (updated by FSM after phase detection)
+        self._detected_phases: int = 1
+
+    def set_current_controller(self, controller: CurrentController) -> None:
+        """Set the current controller for direct current adjustment."""
+        self._current_controller = controller
+
+    def set_detected_phases(self, phases: int) -> None:
+        """Update the detected number of phases (called by FSM after detection)."""
+        self._detected_phases = phases
+        logger.info(f"LoadMonitor: Detected phases updated to {phases}")
 
     def add_consumer(self, consumer: LoadConsumer) -> None:
-        """Add a load consumer (e.g., FSM)."""
+        """Add a load consumer (e.g., FSM) for should_pause notifications."""
         self._consumers.append(consumer)
 
     # Keep old method for backwards compatibility
     def set_fsm(self, fsm: LoadConsumer) -> None:
         """Add FSM as a load consumer."""
         self.add_consumer(fsm)
-
-    def set_ev_limit(self, current: float) -> None:
-        """Update the current EV charging limit (for calculations)."""
-        self._current_ev_limit = current
 
     def signal_charger_resumed(self) -> None:
         """
@@ -303,8 +316,13 @@ class LoadMonitor:
                 # Use minimum charging current during grace period
                 available_for_ev = max(available_for_ev, self.MIN_CHARGING_CURRENT)
 
-        # Recommended current (minimum of phases for safety)
-        recommended = min(available_for_ev, self._max_ev_current)
+        # Calculate per-phase currents to set (capped at max)
+        set_l1 = min(avail_l1, self._max_ev_current)
+        set_l2 = min(avail_l2, self._max_ev_current)
+        set_l3 = min(avail_l3, self._max_ev_current)
+        
+        # Recommended current (minimum of available phases for display)
+        recommended = min(set_l1, set_l2, set_l3)
 
         # Create status
         status = LoadStatus(
@@ -325,31 +343,59 @@ class LoadMonitor:
             recommended_current=recommended,
         )
 
-        # Check for significant change before notifying
+        # Check for significant change
         old_should_pause = self._last_status.should_pause if self._last_status else False
         old_recommended = self._last_status.recommended_current if self._last_status else 0
 
         self._last_status = status
 
-        # Notify consumers if significant change
-        if self._consumers:
-            if should_pause != old_should_pause or abs(recommended - old_recommended) >= 1.0:
-                from .charging_fsm import LoadInfo
+        # =====================================================================
+        # DIRECTLY SET CURRENT if charging and current changed significantly
+        # =====================================================================
+        if is_charging and self._current_controller and not should_pause:
+            # Only set if current changed by at least 1A
+            if abs(recommended - self._last_set_current) >= 1.0:
+                try:
+                    if self._detected_phases >= 3:
+                        # 3-phase: set each phase to its available current
+                        logger.info(
+                            f"LoadMonitor: Setting 3-phase current: "
+                            f"L1={set_l1:.0f}A, L2={set_l2:.0f}A, L3={set_l3:.0f}A"
+                        )
+                        await self._current_controller.do_set_current(
+                            current=recommended,
+                            phases=3,
+                            current_l1=set_l1,
+                            current_l2=set_l2,
+                            current_l3=set_l3,
+                        )
+                    else:
+                        # 1-phase: set single current (charger uses active phase)
+                        logger.info(f"LoadMonitor: Setting 1-phase current: {recommended:.0f}A")
+                        await self._current_controller.do_set_current(
+                            current=recommended,
+                            phases=1,
+                        )
+                    self._last_set_current = recommended
+                except Exception as e:
+                    logger.error(f"LoadMonitor: Failed to set current: {e}")
 
-                load_info = LoadInfo(
-                    home_current_amps=home_current,
-                    available_for_ev_amps=available_for_ev,
-                    should_pause=should_pause,
-                    recommended_current=recommended,
-                    available_l1_amps=min(avail_l1, self._max_ev_current),
-                    available_l2_amps=min(avail_l2, self._max_ev_current),
-                    available_l3_amps=min(avail_l3, self._max_ev_current),
-                )
-                for consumer in self._consumers:
-                    try:
-                        await consumer.on_load_update(load_info)
-                    except Exception as e:
-                        logger.warning(f"Error notifying load consumer: {e}")
+        # =====================================================================
+        # NOTIFY FSM only about should_pause changes
+        # =====================================================================
+        if self._consumers and should_pause != old_should_pause:
+            from .charging_fsm import LoadInfo
+
+            load_info = LoadInfo(
+                should_pause=should_pause,
+                home_current_amps=home_current,
+                available_for_ev_amps=available_for_ev,
+            )
+            for consumer in self._consumers:
+                try:
+                    await consumer.on_load_update(load_info)
+                except Exception as e:
+                    logger.warning(f"Error notifying load consumer: {e}")
 
     def start(self) -> None:
         """Start the load monitor."""

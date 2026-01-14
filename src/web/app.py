@@ -3,11 +3,11 @@ Web Application for FSM-based Charging Controller.
 
 Frontend is a VIEWER with limited control:
 - View status (read-only)
-- Change mode
-- Start charging (MANUAL/IMMEDIATE mode only)
+- Change mode (triggers FSM switch)
+- Start charging
 - Stop charging (always allowed for safety)
 
-All control goes through FSM - no direct charger control from GUI.
+All control goes through FSMManager - no direct charger control from GUI.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from ..charging_fsm import ChargingFSM
     from ..easee_controller import EaseeController
+    from ..fsm_manager import FSMManager
     from ..load_monitor import LoadMonitor
     from ..price_fetcher import PriceFetcher
     from ..schedule_provider import ScheduleProvider
@@ -52,7 +52,7 @@ class TargetKwhRequest(BaseModel):
 
 
 def create_app(
-    fsm: ChargingFSM | None = None,
+    fsm_manager: FSMManager | None = None,
     schedule_provider: ScheduleProvider | None = None,
     load_monitor: LoadMonitor | None = None,
     charger: EaseeController | None = None,
@@ -68,7 +68,7 @@ def create_app(
     )
 
     # Store references
-    app.state.fsm = fsm
+    app.state.fsm_manager = fsm_manager
     app.state.schedule_provider = schedule_provider
     app.state.load_monitor = load_monitor
     app.state.charger = charger
@@ -123,9 +123,9 @@ def create_app(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # FSM status
-        if app.state.fsm:
-            response["fsm"] = app.state.fsm.get_status()
+        # FSM status (from FSMManager)
+        if app.state.fsm_manager:
+            response["fsm"] = app.state.fsm_manager.get_status()
         else:
             response["fsm"] = {"state": "unknown", "error": "FSM not initialized"}
 
@@ -144,11 +144,11 @@ def create_app(
         # Charger status
         if app.state.charger and app.state.charger.last_status:
             status = app.state.charger.last_status
-            
+
             # Note: EASEE sessions API only returns COMPLETED sessions
             # For ongoing sessions, we use FSM timestamps (car_connected_at, charging_started_at)
             # which are already included in the FSM status response
-            
+
             response["charger"] = {
                 "state": status.state.name,
                 "is_online": status.is_online,
@@ -163,6 +163,7 @@ def create_app(
         if app.state.price_fetcher:
             try:
                 from ..config import get_config
+
                 config = get_config()
 
                 forecast = await app.state.price_fetcher.get_prices()
@@ -192,16 +193,18 @@ def create_app(
                     hour = local_time.hour
                     is_night = config.grid_tariff.is_night_hour(hour)
 
-                    hourly_data.append({
-                        "start": h.start_time.isoformat(),
-                        "price_sek": h.price,
-                        "is_night_rate": is_night,
-                        "hour": hour,
-                        "date": local_time.strftime("%m-%d"),
-                        "is_today": local_time.date() == datetime.now().date(),
-                        "is_current": h.start_time <= datetime.now(timezone.utc) < h.end_time,
-                        "is_scheduled": h.start_time.isoformat() in scheduled_hours,
-                    })
+                    hourly_data.append(
+                        {
+                            "start": h.start_time.isoformat(),
+                            "price_sek": h.price,
+                            "is_night_rate": is_night,
+                            "hour": hour,
+                            "date": local_time.strftime("%m-%d"),
+                            "is_today": local_time.date() == datetime.now().date(),
+                            "is_current": h.start_time <= datetime.now(timezone.utc) < h.end_time,
+                            "is_scheduled": h.start_time.isoformat() in scheduled_hours,
+                        }
+                    )
 
                 response["prices"] = {
                     "current": {
@@ -236,9 +239,9 @@ def create_app(
     @app.get("/api/fsm")
     async def get_fsm_status() -> dict:
         """Get FSM state."""
-        if not app.state.fsm:
+        if not app.state.fsm_manager:
             raise HTTPException(status_code=503, detail="FSM not initialized")
-        return app.state.fsm.get_status()
+        return app.state.fsm_manager.get_status()
 
     @app.get("/api/schedule")
     async def get_schedule() -> dict:
@@ -261,6 +264,7 @@ def create_app(
             raise HTTPException(status_code=503, detail="Price fetcher not initialized")
 
         from ..config import get_config
+
         config = get_config()
 
         forecast = await app.state.price_fetcher.get_prices()
@@ -279,19 +283,21 @@ def create_app(
             hour = local_time.hour
             is_night = config.grid_tariff.is_night_hour(hour)
 
-            hourly_data.append({
-                "start": h.start_time.isoformat(),
-                "end": h.end_time.isoformat(),
-                "price_sek": h.price,
-                "is_night_rate": is_night,
-                "hour": hour,
-                "date": local_time.strftime("%m-%d"),
-                "day_name": local_time.strftime("%a"),
-                "is_today": local_time.date() == datetime.now().date(),
-                "is_current": h.start_time <= datetime.now(timezone.utc) < h.end_time,
-                "is_scheduled": h.start_time.isoformat() in scheduled_hours,
-                "level": h.level.value,
-            })
+            hourly_data.append(
+                {
+                    "start": h.start_time.isoformat(),
+                    "end": h.end_time.isoformat(),
+                    "price_sek": h.price,
+                    "is_night_rate": is_night,
+                    "hour": hour,
+                    "date": local_time.strftime("%m-%d"),
+                    "day_name": local_time.strftime("%a"),
+                    "is_today": local_time.date() == datetime.now().date(),
+                    "is_current": h.start_time <= datetime.now(timezone.utc) < h.end_time,
+                    "is_scheduled": h.start_time.isoformat() in scheduled_hours,
+                    "level": h.level.value,
+                }
+            )
 
         return {
             "current": {
@@ -311,16 +317,22 @@ def create_app(
         }
 
     # =========================================================================
-    # CONTROL ENDPOINTS - All go through FSM
+    # CONTROL ENDPOINTS - All go through FSMManager
     # =========================================================================
 
     @app.post("/api/mode")
     async def set_mode(request: ModeChangeRequest) -> dict:
-        """Change charging mode."""
-        if not app.state.fsm:
+        """
+        Change charging mode.
+
+        This may trigger an FSM switch:
+        - SMART, SCHEDULED, SOLAR -> SmartChargingFSM
+        - MANUAL, IMMEDIATE -> ManualChargingFSM
+        """
+        if not app.state.fsm_manager:
             raise HTTPException(status_code=503, detail="FSM not initialized")
 
-        from ..charging_fsm import ChargingMode
+        from ..charging_fsm_base import ChargingMode
 
         mode_map = {
             "smart": ChargingMode.SMART,
@@ -337,11 +349,12 @@ def create_app(
                 detail=f"Invalid mode: {request.mode}. Valid: {list(mode_map.keys())}",
             )
 
-        app.state.fsm.set_mode(mode)
+        app.state.fsm_manager.set_mode(mode)
 
         return {
             "status": "ok",
             "mode": mode.value,
+            "active_fsm": app.state.fsm_manager.active_fsm.__class__.__name__,
         }
 
     @app.post("/api/charger/start")
@@ -349,12 +362,12 @@ def create_app(
         """
         Request to start charging.
 
-        FSM decides based on state + mode.
+        FSMManager routes to active FSM which decides based on state + mode.
         """
-        if not app.state.fsm:
+        if not app.state.fsm_manager:
             raise HTTPException(status_code=503, detail="FSM not initialized")
 
-        result = await app.state.fsm.request_start()
+        result = await app.state.fsm_manager.request_start()
 
         if result["success"]:
             return {"status": "ok", "message": result["reason"]}
@@ -365,12 +378,12 @@ def create_app(
         """
         Request to stop charging.
 
-        FSM decides based on state + mode.
+        FSMManager routes to active FSM which decides based on state + mode.
         """
-        if not app.state.fsm:
+        if not app.state.fsm_manager:
             raise HTTPException(status_code=503, detail="FSM not initialized")
 
-        result = await app.state.fsm.request_stop()
+        result = await app.state.fsm_manager.request_stop()
 
         if result["success"]:
             return {"status": "ok", "message": result["reason"]}
@@ -381,12 +394,12 @@ def create_app(
         """
         Request to resume charging.
 
-        FSM decides based on state + mode.
+        FSMManager routes to active FSM which decides based on state + mode.
         """
-        if not app.state.fsm:
+        if not app.state.fsm_manager:
             raise HTTPException(status_code=503, detail="FSM not initialized")
 
-        result = await app.state.fsm.request_resume()
+        result = await app.state.fsm_manager.request_resume()
 
         if result["success"]:
             return {"status": "ok", "message": result["reason"]}
@@ -440,10 +453,7 @@ def create_app(
         success = await app.state.saj_monitor.retry_login()
         if success:
             return {"status": "ok", "message": "SAJ login successful"}
-        raise HTTPException(
-            status_code=401,
-            detail=app.state.saj_monitor.login_error or "Login failed"
-        )
+        raise HTTPException(status_code=401, detail=app.state.saj_monitor.login_error or "Login failed")
 
     @app.get("/api/solar/captcha")
     async def get_solar_captcha() -> dict:
@@ -465,14 +475,13 @@ def create_app(
         if not app.state.saj_monitor:
             raise HTTPException(status_code=503, detail="SAJ monitor not configured")
 
-        logger.info(f"CAPTCHA login request: code={request.captcha_code}, has_key={app.state.saj_monitor._captcha_key is not None}")
+        logger.info(
+            f"CAPTCHA login request: code={request.captcha_code}, has_key={app.state.saj_monitor._captcha_key is not None}"
+        )
         success = await app.state.saj_monitor.login_with_captcha(request.captcha_code)
         if success:
             return {"status": "ok", "message": "SAJ login successful"}
-        raise HTTPException(
-            status_code=401,
-            detail=app.state.saj_monitor.login_error or "Login failed"
-        )
+        raise HTTPException(status_code=401, detail=app.state.saj_monitor.login_error or "Login failed")
 
     # =========================================================================
     # WEBSOCKET

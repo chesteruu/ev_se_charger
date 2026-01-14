@@ -5,6 +5,7 @@ This module provides:
 1. State monitoring - polls EASEE API and emits state change events
 2. Basic actions - do_charge(), do_pause(), do_stop(), do_set_current()
 
+It IMPLEMENTS the ChargerController interface defined in charging_fsm_base.
 It does NOT contain business logic about when to charge.
 All decisions are made by the ChargingFSM.
 """
@@ -14,139 +15,64 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from enum import Enum
-from typing import TYPE_CHECKING, Any
 
 from pyeasee import Charger, Easee, Site
 from pyeasee.site import Circuit
 
+from .charging_fsm_base import ChargerState, ChargerStatus, PhaseDetectionResult
 from .config import get_config
-
-if TYPE_CHECKING:
-    from .charging_fsm import PhaseDetectionResult
 
 logger = logging.getLogger(__name__)
 
 
-class ChargerState(Enum):
-    """EASEE charger operational states."""
+# =============================================================================
+# EASEE-SPECIFIC STATE MAPPING
+# =============================================================================
 
-    DISCONNECTED = 1  # No car connected
-    AWAITING_START = 2  # Car connected, waiting to start
-    CHARGING = 3  # Actively charging
-    COMPLETED = 4  # Charging completed
-    ERROR = 5  # Error state
-    READY_TO_CHARGE = 6  # Ready to charge
 
-    @classmethod
-    def from_api_state(cls, state) -> ChargerState:
-        """Convert API state (string or int) to enum."""
-        # Handle string states (newer API format)
-        if isinstance(state, str):
-            state_str_map = {
-                "DISCONNECTED": cls.DISCONNECTED,
-                "AWAITING_START": cls.AWAITING_START,
-                "AwaitingStart": cls.AWAITING_START,
-                "CHARGING": cls.CHARGING,
-                "Charging": cls.CHARGING,
-                "COMPLETED": cls.COMPLETED,
-                "Completed": cls.COMPLETED,
-                "ERROR": cls.ERROR,
-                "Error": cls.ERROR,
-                "READY_TO_CHARGE": cls.READY_TO_CHARGE,
-                "ReadyToCharge": cls.READY_TO_CHARGE,
-                "PAUSED": cls.AWAITING_START,
-                "Paused": cls.AWAITING_START,
-                "OFFLINE": cls.DISCONNECTED,
-                "Offline": cls.DISCONNECTED,
-            }
-            return state_str_map.get(state, cls.ERROR)
-
-        # Handle integer states (older API format)
-        state_int_map = {
-            1: cls.DISCONNECTED,
-            2: cls.AWAITING_START,
-            3: cls.CHARGING,
-            4: cls.COMPLETED,
-            5: cls.ERROR,
-            6: cls.READY_TO_CHARGE,
+def _easee_state_to_charger_state(state) -> ChargerState:
+    """
+    Convert EASEE API state to abstract ChargerState.
+    
+    This is an internal helper - the interface contract uses ChargerState.
+    """
+    # Handle string states (newer API format)
+    if isinstance(state, str):
+        state_str_map = {
+            "DISCONNECTED": ChargerState.DISCONNECTED,
+            # Both AWAITING_START and READY_TO_CHARGE map to READY
+            "AWAITING_START": ChargerState.READY,
+            "AwaitingStart": ChargerState.READY,
+            "READY_TO_CHARGE": ChargerState.READY,
+            "ReadyToCharge": ChargerState.READY,
+            "PAUSED": ChargerState.READY,
+            "Paused": ChargerState.READY,
+            # Charging
+            "CHARGING": ChargerState.CHARGING,
+            "Charging": ChargerState.CHARGING,
+            # Completed
+            "COMPLETED": ChargerState.COMPLETED,
+            "Completed": ChargerState.COMPLETED,
+            # Error/Offline
+            "ERROR": ChargerState.ERROR,
+            "Error": ChargerState.ERROR,
+            "OFFLINE": ChargerState.DISCONNECTED,
+            "Offline": ChargerState.DISCONNECTED,
         }
-        return state_int_map.get(state, cls.ERROR)
+        return state_str_map.get(state, ChargerState.ERROR)
 
-    @property
-    def is_car_connected(self) -> bool:
-        """Check if a car is connected."""
-        return self not in (ChargerState.DISCONNECTED, ChargerState.ERROR)
-
-    @property
-    def is_charging(self) -> bool:
-        """Check if actively charging."""
-        return self == ChargerState.CHARGING
-
-
-@dataclass
-class ChargerStatus:
-    """Current charger status data."""
-
-    state: ChargerState
-    is_online: bool
-    power_watts: float
-    current_amps: float
-    voltage_volts: float
-    energy_session_kwh: float
-    energy_total_kwh: float
-    temperature_celsius: float
-    max_current_amps: float
-    dynamic_current_amps: float
-    cable_locked: bool
-    timestamp: datetime
-    raw_data: dict[str, Any]
-    output_phase: int = 0  # Number of phases in use (0=none, 1=single, 3=three)
-    session_start: datetime | None = None  # Session start time from EASEE API
-    # Per-phase output currents from charger (for accurate load calculation)
-    current_l1_amps: float = 0.0
-    current_l2_amps: float = 0.0
-    current_l3_amps: float = 0.0
-
-    @property
-    def is_charging(self) -> bool:
-        """Check if actively charging."""
-        return self.state.is_charging
-
-    @property
-    def is_car_connected(self) -> bool:
-        """Check if car is connected."""
-        return self.state.is_car_connected
-
-    @property
-    def detected_phases(self) -> int:
-        """Get detected number of phases.
-
-        EASEE API uses encoded values:
-        - outputPhase = 10 → 1-phase
-        - outputPhase = 20 → 2-phase
-        - outputPhase = 30 → 3-phase
-        """
-        if self.output_phase >= 10:
-            # Decode EASEE API value
-            return self.output_phase // 10
-        if self.output_phase > 0:
-            return self.output_phase
-        # Fallback: estimate from power if available
-        if self.power_watts > 0 and self.current_amps > 0:
-            voltage = self.voltage_volts or 230
-            estimated_phases = self.power_watts / (self.current_amps * voltage)
-            if estimated_phases > 2:
-                return 3
-            return 1
-        return 0
-
-    @property
-    def power_kw(self) -> float:
-        """Get power in kW."""
-        return self.power_watts / 1000
+    # Handle integer states (older API format - chargerOpMode)
+    # EASEE chargerOpMode: 1=Disconnected, 2=AwaitingStart, 3=Charging, 4=Completed, 5=Error, 6=ReadyToCharge
+    state_int_map = {
+        1: ChargerState.DISCONNECTED,
+        2: ChargerState.READY,  # AWAITING_START -> READY
+        3: ChargerState.CHARGING,
+        4: ChargerState.COMPLETED,
+        5: ChargerState.ERROR,
+        6: ChargerState.READY,  # READY_TO_CHARGE -> READY
+    }
+    return state_int_map.get(state, ChargerState.ERROR)
 
 
 class EaseeController:
@@ -308,7 +234,7 @@ class EaseeController:
             )
 
         status = ChargerStatus(
-            state=ChargerState.from_api_state(state.get("chargerOpMode", 1)),
+            state=_easee_state_to_charger_state(state.get("chargerOpMode", 1)),
             is_online=state.get("isOnline", False),
             power_watts=state.get("totalPower", 0) * 1000,
             current_amps=state.get("outputCurrent", 0),
@@ -320,12 +246,10 @@ class EaseeController:
             dynamic_current_amps=state.get("dynamicCircuitCurrentP1", self._max_current),
             cable_locked=state.get("cableLocked", False),
             timestamp=datetime.now(),
-            raw_data=state,
-            output_phase=state.get("outputPhase", 0),
-            session_start=session_start_dt,
             current_l1_amps=ev_current_l1,
             current_l2_amps=ev_current_l2,
             current_l3_amps=ev_current_l3,
+            raw_data=state,  # Keep raw data for debugging
         )
 
         self._last_status = status
@@ -637,22 +561,28 @@ class EaseeController:
         try:
             logger.info("do_detect_phases: Starting detection charge...")
 
-            # Start charging at minimum current
-            await self._charger.set_dynamic_charger_current(self.MIN_CURRENT)
+            # Start charging at minimum current - with timeout
+            try:
+                await asyncio.wait_for(
+                    self._charger.set_dynamic_charger_current(self.MIN_CURRENT),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("do_detect_phases: set_dynamic_charger_current timed out")
 
             try:
-                await self._charger.override_schedule()
-            except Exception:
+                await asyncio.wait_for(self._charger.override_schedule(), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):
                 pass
 
-            await self._charger.start()
+            await asyncio.wait_for(self._charger.start(), timeout=10.0)
 
             # Wait for charging to stabilize and get accurate power reading
             # Cars need time to negotiate and start drawing full current
             await asyncio.sleep(15)
 
-            # Read the state to detect phases
-            state = await self._charger.get_state()
+            # Read the state to detect phases - with timeout
+            state = await asyncio.wait_for(self._charger.get_state(), timeout=10.0)
 
             power_kw = state.get("totalPower", 0)
             output_phase_raw = state.get("outputPhase", 0)
@@ -705,8 +635,8 @@ class EaseeController:
                 num_phases = 1
                 logger.warning("do_detect_phases: Defaulting to 1-phase")
 
-            # Pause after detection
-            await self._charger.pause()
+            # Pause after detection - with timeout
+            await asyncio.wait_for(self._charger.pause(), timeout=10.0)
 
             # Calculate max power based on detected phases
             max_power_kw = (self._max_current * 230 * num_phases) / 1000
@@ -724,11 +654,19 @@ class EaseeController:
 
             return result
 
+        except asyncio.TimeoutError:
+            logger.error("do_detect_phases: Operation timed out")
+            # Try to pause in case we started charging
+            try:
+                await asyncio.wait_for(self._charger.pause(), timeout=5.0)
+            except Exception:
+                pass
+            return None
         except Exception as e:
             logger.error(f"do_detect_phases failed: {e}")
             # Try to pause in case we started charging
             try:
-                await self._charger.pause()
+                await asyncio.wait_for(self._charger.pause(), timeout=5.0)
             except Exception:
                 pass
             return None

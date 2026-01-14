@@ -3,16 +3,18 @@ FSM-based EV Charging Controller - Main Entry Point.
 
 Architecture:
 - EaseeController: Polls charger state, emits state changes
-- ChargingFSM: Central state machine, receives events, controls charger
+- FSMManager: Manages FSM instances, handles mode switching
+  - SmartChargingFSM: Schedule-aware charging (SMART, SCHEDULED, SOLAR)
+  - ManualChargingFSM: User-controlled charging (MANUAL, IMMEDIATE)
 - ScheduleProvider: Calculates charging windows, notifies FSM
 - LoadMonitor: Monitors home load, notifies FSM
 - Web App: Read-only viewer + mode changes
 
 Flow:
-1. EaseeController detects charger state change -> FSM.on_charger_state_change()
-2. ScheduleProvider detects schedule change -> FSM.on_schedule_update()
-3. LoadMonitor detects load change -> FSM.on_load_update()
-4. FSM evaluates state and takes action (start/stop/pause charging)
+1. EaseeController detects charger state change -> FSMManager.on_charger_state_change()
+2. ScheduleProvider detects schedule change -> FSMManager.on_schedule_update()
+3. LoadMonitor detects load change -> FSMManager.on_load_update()
+4. Active FSM evaluates state and takes action (start/stop/pause charging)
 """
 
 from __future__ import annotations
@@ -26,9 +28,10 @@ from typing import TYPE_CHECKING
 
 import uvicorn
 
-from .charging_fsm import ChargingFSM, set_charging_fsm
+from .charging_fsm import set_charging_fsm
 from .config import get_config, load_config
 from .easee_controller import EaseeController
+from .fsm_manager import FSMManager, set_fsm_manager
 from .load_monitor import LoadMonitor, set_load_monitor
 from .price_fetcher import PriceFetcher, set_price_fetcher
 from .saj_monitor import SAJMonitor, get_saj_monitor
@@ -63,7 +66,7 @@ class ChargingApplication:
 
         # Components (initialized in start())
         self._charger: EaseeController | None = None
-        self._fsm: ChargingFSM | None = None
+        self._fsm_manager: FSMManager | None = None
         self._schedule_provider: ScheduleProvider | None = None
         self._load_monitor: LoadMonitor | None = None
         self._price_fetcher: PriceFetcher | None = None
@@ -83,10 +86,12 @@ class ChargingApplication:
         self._charger = EaseeController()
         await self._charger.connect()
 
-        # 2. Initialize ChargingFSM
-        logger.info("Initializing charging FSM...")
-        self._fsm = ChargingFSM(self._charger)
-        set_charging_fsm(self._fsm)
+        # 2. Initialize FSMManager (manages both Smart and Manual FSMs)
+        logger.info("Initializing FSM Manager...")
+        self._fsm_manager = FSMManager(self._charger)
+        set_fsm_manager(self._fsm_manager)
+        # Set global FSM singleton for backward compatibility
+        set_charging_fsm(self._fsm_manager.active_fsm)
 
         # 3. Initialize PriceFetcher
         logger.info("Initializing price fetcher...")
@@ -96,13 +101,16 @@ class ChargingApplication:
         # 4. Initialize ScheduleProvider
         logger.info("Initializing schedule provider...")
         self._schedule_provider = ScheduleProvider(self._price_fetcher)
-        self._schedule_provider.set_fsm(self._fsm)
+        self._schedule_provider.set_fsm(self._fsm_manager)
         set_schedule_provider(self._schedule_provider)
 
         # 5. Initialize LoadMonitor
         logger.info("Initializing load monitor...")
         self._load_monitor = LoadMonitor()
-        self._load_monitor.set_fsm(self._fsm)
+        # LoadMonitor directly controls current via controller (not FSM)
+        self._load_monitor.set_current_controller(self._charger)
+        # LoadMonitor notifies FSM only about should_pause signal
+        self._load_monitor.set_fsm(self._fsm_manager)
         set_load_monitor(self._load_monitor)
 
         # 6. Initialize SaveEyeMonitor (if configured)
@@ -119,17 +127,17 @@ class ChargingApplication:
             logger.info("Initializing SAJ solar monitor...")
             self._saj_monitor = get_saj_monitor()
 
-        # 7. Wire charger state changes to FSM
-        self._charger.on_state_change(self._fsm.on_charger_state_change)
+        # 7. Wire charger state changes to FSMManager
+        self._charger.on_state_change(self._fsm_manager.on_charger_state_change)
 
-        # 8. Wire phase detection: FSM -> ScheduleProvider
-        # When FSM detects phases, ScheduleProvider updates hours needed
-        self._fsm.add_phase_detection_consumer(self._schedule_provider)
+        # 8. Wire phase detection: FSMManager -> ScheduleProvider
+        # Both FSMs notify ScheduleProvider when phases are detected
+        self._fsm_manager.add_phase_detection_consumer(self._schedule_provider)
 
         # 9. Create web app
         logger.info("Creating web application...")
         self._web_app = create_app(
-            fsm=self._fsm,
+            fsm_manager=self._fsm_manager,
             schedule_provider=self._schedule_provider,
             load_monitor=self._load_monitor,
             charger=self._charger,
@@ -138,7 +146,7 @@ class ChargingApplication:
         )
 
         # 10. Start all components
-        await self._fsm.start()
+        await self._fsm_manager.start()
         await self._schedule_provider.start()
         self._load_monitor.start()
 
@@ -175,8 +183,8 @@ class ChargingApplication:
         if self._schedule_provider:
             await self._schedule_provider.stop()
 
-        if self._fsm:
-            await self._fsm.stop()
+        if self._fsm_manager:
+            await self._fsm_manager.stop()
 
         if self._charger:
             await self._charger.disconnect()

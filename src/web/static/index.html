@@ -975,8 +975,10 @@
                 const powerKw = (fsm.charger_power_watts || 0) / 1000;
                 document.getElementById('chargingPower').innerHTML = 
                     `${powerKw.toFixed(1)}<span class="unit">kW</span>`;
+                // Get recommended current from load data (LoadMonitor controls current)
+                const recommendedCurrent = data.load?.recommended_current || 0;
                 document.getElementById('chargingCurrent').textContent = 
-                    `${fsm.charger_current_amps || 0} A @ ${Math.round(fsm.current_limit_amps || 0)} A limit`;
+                    `${fsm.charger_current_amps || 0} A @ ${Math.round(recommendedCurrent)} A limit`;
                 document.getElementById('sessionEnergy').textContent = 
                     `Session: ${(fsm.session_energy_kwh || 0).toFixed(2)} kWh`;
             }
