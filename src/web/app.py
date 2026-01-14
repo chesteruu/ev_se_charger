@@ -187,9 +187,12 @@ def create_app(
                         scheduled_hours.add(window.start_time.isoformat())
 
                 # Build hourly data with date info
+                # Use price fetcher's timezone (derived from nordpool_area) for local time
+                local_tz = app.state.price_fetcher.timezone
+                now_local = datetime.now(local_tz)
                 hourly_data = []
                 for h in sorted(forecast.prices, key=lambda x: x.start_time):
-                    local_time = h.start_time.astimezone()
+                    local_time = h.start_time.astimezone(local_tz)
                     hour = local_time.hour
                     is_night = config.grid_tariff.is_night_hour(hour)
 
@@ -200,7 +203,7 @@ def create_app(
                             "is_night_rate": is_night,
                             "hour": hour,
                             "date": local_time.strftime("%m-%d"),
-                            "is_today": local_time.date() == datetime.now().date(),
+                            "is_today": local_time.date() == now_local.date(),
                             "is_current": h.start_time <= datetime.now(timezone.utc) < h.end_time,
                             "is_scheduled": h.start_time.isoformat() in scheduled_hours,
                         }
@@ -277,9 +280,12 @@ def create_app(
                 scheduled_hours.add(window.start_time.isoformat())
 
         # Build hourly data with date info
+        # Use price fetcher's timezone (derived from nordpool_area) for local time
+        local_tz = app.state.price_fetcher.timezone
+        now_local = datetime.now(local_tz)
         hourly_data = []
         for h in sorted(forecast.prices, key=lambda x: x.start_time):
-            local_time = h.start_time.astimezone()
+            local_time = h.start_time.astimezone(local_tz)
             hour = local_time.hour
             is_night = config.grid_tariff.is_night_hour(hour)
 
@@ -292,7 +298,7 @@ def create_app(
                     "hour": hour,
                     "date": local_time.strftime("%m-%d"),
                     "day_name": local_time.strftime("%a"),
-                    "is_today": local_time.date() == datetime.now().date(),
+                    "is_today": local_time.date() == now_local.date(),
                     "is_current": h.start_time <= datetime.now(timezone.utc) < h.end_time,
                     "is_scheduled": h.start_time.isoformat() in scheduled_hours,
                     "level": h.level.value,

@@ -77,7 +77,7 @@ class HomeElectricalConfig:
 class PriceConfig:
     """Electricity price configuration."""
     source: str = "nordpool"
-    nordpool_area: str = "NO1"
+    nordpool_area: str = "NO1"  # Timezone auto-detected from area
     tibber_access_token: str | None = None
     currency: str = "NOK"
     vat_percent: float = 25.0  # VAT/moms percentage (25% in Sweden)

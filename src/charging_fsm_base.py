@@ -627,7 +627,6 @@ class BaseChargingFSM(ABC):
             "charger_state": ctx.charger_state.name if ctx.charger_state else None,
             "charger_power_watts": ctx.charger_power_watts,
             "charger_current_amps": ctx.charger_current_amps,
-            "current_limit_amps": ctx.current_limit_amps,
             "session_energy_kwh": ctx.session_energy_kwh,
             "schedule": {
                 "is_in_window": ctx.schedule.is_in_window,

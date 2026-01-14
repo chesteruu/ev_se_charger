@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import httpx
@@ -243,9 +244,39 @@ class NordPoolFetcher(PriceFetcherBase):
 
     # Nord Pool Data Portal API
     BASE_URL = "https://dataportal-api.nordpoolgroup.com/api/DayAheadPrices"
+    
+    # Area to timezone mapping
+    AREA_TIMEZONES = {
+        # Norway
+        "NO1": "Europe/Oslo",
+        "NO2": "Europe/Oslo",
+        "NO3": "Europe/Oslo",
+        "NO4": "Europe/Oslo",
+        "NO5": "Europe/Oslo",
+        # Sweden
+        "SE1": "Europe/Stockholm",
+        "SE2": "Europe/Stockholm",
+        "SE3": "Europe/Stockholm",
+        "SE4": "Europe/Stockholm",
+        # Denmark
+        "DK1": "Europe/Copenhagen",
+        "DK2": "Europe/Copenhagen",
+        # Finland
+        "FI": "Europe/Helsinki",
+        # Baltic
+        "EE": "Europe/Tallinn",
+        "LV": "Europe/Riga",
+        "LT": "Europe/Vilnius",
+    }
 
     def __init__(self, currency: str = "SEK"):
         self.currency = currency
+    
+    @classmethod
+    def get_timezone_for_area(cls, area: str) -> ZoneInfo:
+        """Get timezone for a Nord Pool area code."""
+        tz_name = cls.AREA_TIMEZONES.get(area.upper(), "Europe/Stockholm")
+        return ZoneInfo(tz_name)
 
     async def fetch_prices(self, area: str = "SE3") -> PriceForecast:
         """
@@ -485,10 +516,13 @@ class PriceFetcher:
         # VAT and tariff settings
         self._vat_percent = config.price.vat_percent
         self._grid_tariff = config.grid_tariff
+        
+        # Timezone derived from Nord Pool area
+        self._timezone = NordPoolFetcher.get_timezone_for_area(self._area)
 
         logger.info(
-            f"Price fetcher initialized: VAT={self._vat_percent}%, "
-            f"day_rate={self._grid_tariff.day_rate_ore}öre, "
+            f"Price fetcher initialized: area={self._area}, timezone={self._timezone}, "
+            f"VAT={self._vat_percent}%, day_rate={self._grid_tariff.day_rate_ore}öre, "
             f"night_rate={self._grid_tariff.night_rate_ore}öre "
             f"(night: {self._grid_tariff.night_start_hour}:00-{self._grid_tariff.night_end_hour}:00)"
         )
@@ -548,12 +582,15 @@ class PriceFetcher:
 
         Nord Pool prices are spot prices excluding VAT.
         Total price = (spot_price * (1 + VAT%/100)) + grid_tariff
+        
+        Uses configured timezone (e.g., Europe/Stockholm) for local hour calculation.
         """
         vat_multiplier = 1 + (self._vat_percent / 100)
 
         for price in forecast.prices:
-            # Get the hour in local time for tariff calculation
-            local_hour = price.start_time.astimezone().hour
+            # Get the hour in configured local time for tariff calculation
+            local_time = price.start_time.astimezone(self._timezone)
+            local_hour = local_time.hour
 
             # Original spot price (excluding VAT)
             spot_price = price.price
@@ -576,6 +613,11 @@ class PriceFetcher:
                 f"Hour {local_hour:02d}: spot={spot_price:.4f} + VAT={price_with_vat - spot_price:.4f} "
                 f"+ tariff={tariff:.4f} ({'night' if is_night else 'day'}) = {total_price:.4f} SEK/kWh"
             )
+
+    @property
+    def timezone(self) -> ZoneInfo:
+        """Get configured timezone."""
+        return self._timezone
 
     @property
     def current_price(self) -> HourlyPrice | None:
