@@ -377,8 +377,28 @@ class BaseChargingFSM(ABC):
 
     @property
     def last_detection_result(self) -> PhaseDetectionResult | None:
-        """Get last phase detection result."""
+        """Get current session's phase detection result (None if not detected yet)."""
         return self._last_detection_result
+
+    def _reset_session(self) -> None:
+        """
+        Reset session-specific state when car disconnects.
+        
+        Each session starts fresh - no carrying over stale detection results.
+        """
+        logger.info("FSM: Resetting session state")
+        self._last_detection_result = None
+        self._context.car_connected_at = None
+        self._context.charging_started_at = None
+        self._context.session_energy_kwh = 0.0
+        self._last_command_time = None
+        self._last_command_type = None
+        
+        # Notify LoadMonitor to reset detected phases
+        from .load_monitor import get_load_monitor
+        lm = get_load_monitor()
+        if lm:
+            lm.set_detected_phases(1)  # Reset to default (1-phase)
 
     def set_mode(self, mode: ChargingMode) -> None:
         """Set charging mode."""
@@ -394,10 +414,16 @@ class BaseChargingFSM(ABC):
         """
         Restore FSM context from another FSM instance.
         
-        Used when switching between FSMs to preserve state.
+        Used when switching between FSMs to preserve state WITHIN the same session.
+        Detection result is only restored if car is still connected.
         """
         self._context = context
-        self._last_detection_result = detection_result
+        # Only restore detection result if we're in an active session (not IDLE)
+        if context.state != FSMState.IDLE and detection_result is not None:
+            self._last_detection_result = detection_result
+        else:
+            # Don't carry over stale detection results
+            self._last_detection_result = None
 
     def _is_in_command_grace_period(self) -> bool:
         """
@@ -576,6 +602,10 @@ class BaseChargingFSM(ABC):
         self._context.state_entered_at = datetime.now(timezone.utc)
 
         logger.info(f"FSM: {old_state.value} -> {new_state.value} ({reason})")
+
+        # Reset session state when car disconnects (entering IDLE)
+        if new_state == FSMState.IDLE:
+            self._reset_session()
 
         # Notify callbacks
         for callback in self._state_callbacks:

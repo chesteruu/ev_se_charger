@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from .charging_fsm import LoadInfo
     from .charging_fsm_base import ChargerStatus, CurrentController
     from .saveeye_monitor import PowerReading
+    from .schedule_provider import CurrentChangeConsumer
 
 
 # =============================================================================
@@ -81,11 +82,13 @@ class LoadMonitor:
     - Calculates home load (excluding EV)
     - Calculates available capacity for EV per phase
     - DIRECTLY sets charging current via CurrentController
-    - Notifies FSM only about should_pause (not current values)
+    - Notifies FSM about should_pause signal
+    - Notifies ScheduleProvider about current changes (affects charging plan)
     """
 
     MIN_CHARGING_CURRENT = 6.0  # Minimum charging current (A)
     PHASE_SWITCH_GRACE_SECONDS = 15.0  # Grace period after phase switch
+    CURRENT_CHANGE_THRESHOLD = 2.0  # Only notify scheduler if current changed by this much (A)
 
     def __init__(self) -> None:
         config = get_config()
@@ -97,8 +100,10 @@ class LoadMonitor:
 
         self._consumers: list[LoadConsumer] = []
         self._current_controller: CurrentController | None = None
+        self._current_change_consumer: CurrentChangeConsumer | None = None
         self._last_status: LoadStatus | None = None
         self._last_set_current: float = 0.0  # Track what we last set
+        self._last_notified_current: float = 0.0  # Track what we last notified to scheduler
         self._running = False
 
         # Smoothing
@@ -115,6 +120,10 @@ class LoadMonitor:
     def set_current_controller(self, controller: CurrentController) -> None:
         """Set the current controller for direct current adjustment."""
         self._current_controller = controller
+
+    def set_current_change_consumer(self, consumer: CurrentChangeConsumer) -> None:
+        """Set the consumer for current change notifications (e.g., ScheduleProvider)."""
+        self._current_change_consumer = consumer
 
     def set_detected_phases(self, phases: int) -> None:
         """Update the detected number of phases (called by FSM after detection)."""
@@ -379,6 +388,20 @@ class LoadMonitor:
                     self._last_set_current = recommended
                 except Exception as e:
                     logger.error(f"LoadMonitor: Failed to set current: {e}")
+
+        # =====================================================================
+        # NOTIFY SCHEDULER if current changed significantly (affects charging plan)
+        # =====================================================================
+        if self._current_change_consumer and is_charging:
+            if abs(recommended - self._last_notified_current) >= self.CURRENT_CHANGE_THRESHOLD:
+                try:
+                    await self._current_change_consumer.on_current_change(
+                        available_current=recommended,
+                        phases=self._detected_phases,
+                    )
+                    self._last_notified_current = recommended
+                except Exception as e:
+                    logger.warning(f"Error notifying current change consumer: {e}")
 
         # =====================================================================
         # NOTIFY FSM only about should_pause changes

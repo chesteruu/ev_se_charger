@@ -47,6 +47,19 @@ class ScheduleConsumer(Protocol):
         """Called when schedule changes."""
         ...
 
+
+@runtime_checkable
+class CurrentChangeConsumer(Protocol):
+    """
+    Interface for components that need to know about current changes.
+    
+    ScheduleProvider implements this to recalculate plan when current changes.
+    """
+
+    async def on_current_change(self, available_current: float, phases: int) -> None:
+        """Called when available current changes significantly."""
+        ...
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,9 +137,18 @@ class ScheduleProvider:
         self._night_start = config.grid_tariff.night_start_hour
         self._night_end = config.grid_tariff.night_end_hour
 
-        # Phase detection results
+        # Phase detection results (from initial detection)
         self._detected_phases: int | None = None
         self._detected_power_kw: float | None = None
+        
+        # Effective power (updated by LoadMonitor based on available current)
+        self._effective_power_kw: float | None = None
+        
+        # Power assumed when plan was created (to detect significant changes)
+        self._plan_assumed_power_kw: float | None = None
+        
+        # Track price changes to avoid unnecessary plan recreation
+        self._last_price_hash: str | None = None
 
         # Calculate hours needed (initial estimate, updated after phase detection)
         if self._charging_power_kw > 0:
@@ -208,6 +230,52 @@ class ScheduleProvider:
             await self._create_daily_plan()
             await self._evaluate_schedule()
 
+    # =========================================================================
+    # CurrentChangeConsumer interface
+    # =========================================================================
+
+    POWER_CHANGE_THRESHOLD_PERCENT = 20  # Recreate plan if power changes by this much
+
+    async def on_current_change(self, available_current: float, phases: int) -> None:
+        """
+        Called when available current changes significantly.
+        
+        Updates effective power and recalculates plan if power changed >20%
+        from what was assumed when the plan was created.
+        """
+        # Calculate effective power based on available current
+        voltage = 230  # V (typical EU voltage)
+        effective_power_kw = (available_current * voltage * phases) / 1000
+        
+        old_hours = self._hours_needed
+        old_effective = self._effective_power_kw
+        
+        # Update effective power
+        self._effective_power_kw = effective_power_kw
+        
+        # Recalculate hours needed
+        if effective_power_kw > 0:
+            self._hours_needed = self._target_kwh / effective_power_kw
+        
+        # Check if power changed significantly from what plan assumed
+        if self._plan_assumed_power_kw and self._plan_assumed_power_kw > 0:
+            change_percent = abs(effective_power_kw - self._plan_assumed_power_kw) / self._plan_assumed_power_kw * 100
+            
+            if change_percent >= self.POWER_CHANGE_THRESHOLD_PERCENT:
+                logger.info(
+                    f"Significant power change: {self._plan_assumed_power_kw:.1f}kW -> {effective_power_kw:.1f}kW "
+                    f"({change_percent:.0f}% change). Recreating plan."
+                )
+                await self._create_daily_plan()
+                return
+        
+        # Log minor changes at debug level
+        if old_effective and abs(effective_power_kw - old_effective) > 0.5:
+            logger.debug(
+                f"Current update: {available_current:.1f}A ({phases}-phase) = "
+                f"{effective_power_kw:.1f}kW. Hours needed: {old_hours:.1f} -> {self._hours_needed:.1f}"
+            )
+
     async def start(self) -> None:
         """Start the schedule provider."""
         if self._running:
@@ -258,19 +326,46 @@ class ScheduleProvider:
         logger.info("Schedule provider stopped")
 
     async def _refresh_prices(self) -> None:
-        """Refresh price data and re-evaluate schedule."""
+        """Refresh price data and recreate plan only if prices changed."""
         try:
-            await self._price_fetcher.get_prices(force_refresh=True)
-            logger.debug("Prices refreshed")
-            # Re-create plan with new prices
-            await self._create_daily_plan()
+            forecast = await self._price_fetcher.get_prices(force_refresh=True)
+            
+            # Create a hash of prices to detect changes
+            price_hash = self._compute_price_hash(forecast)
+            
+            if price_hash != self._last_price_hash:
+                logger.info("Prices changed - recreating charging plan")
+                self._last_price_hash = price_hash
+                await self._create_daily_plan()
+            else:
+                logger.debug("Prices unchanged - keeping current plan")
         except Exception as e:
             logger.warning(f"Failed to refresh prices: {e}")
 
+    def _compute_price_hash(self, forecast: PriceForecast) -> str:
+        """Compute a hash of price data to detect changes."""
+        # Simple hash based on prices for the next 24 hours
+        prices_str = "|".join(
+            f"{p.start_time.isoformat()}:{p.price:.4f}"
+            for p in sorted(forecast.prices, key=lambda x: x.start_time)[:24]
+        )
+        return prices_str
+
     async def _create_daily_plan(self) -> None:
-        """Create a charging plan for the day."""
+        """
+        Create a charging plan for the day.
+        
+        Called only when:
+        - Prices change (detected in _refresh_prices)
+        - Target kWh changes (set_target_kwh)
+        - Phase detection completes (on_phases_detected)
+        - Scheduled times (midnight/noon)
+        """
         try:
             forecast = await self._price_fetcher.get_prices()
+            
+            # Update price hash
+            self._last_price_hash = self._compute_price_hash(forecast)
 
             # Get cheapest hours for charging (round up to ensure we have enough time)
             hours_needed = math.ceil(self._hours_needed)
@@ -306,9 +401,17 @@ class ScheduleProvider:
                 target_kwh=self._target_kwh,
                 estimated_cost_sek=total_cost,
             )
+            
+            # Record the power assumed for this plan (for detecting significant changes)
+            self._plan_assumed_power_kw = (
+                self._effective_power_kw 
+                or self._detected_power_kw 
+                or self._charging_power_kw
+            )
 
             logger.info(
-                f"Created charging plan: {len(windows)} windows, "
+                f"Created charging plan: {len(windows)} windows for {hours_needed}h @ "
+                f"{self._plan_assumed_power_kw:.1f}kW, target: {self._target_kwh}kWh, "
                 f"est. cost: {total_cost:.2f} SEK"
             )
 

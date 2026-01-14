@@ -109,8 +109,10 @@ class ChargingApplication:
         self._load_monitor = LoadMonitor()
         # LoadMonitor directly controls current via controller (not FSM)
         self._load_monitor.set_current_controller(self._charger)
-        # LoadMonitor notifies FSM only about should_pause signal
+        # LoadMonitor notifies FSM about should_pause signal
         self._load_monitor.set_fsm(self._fsm_manager)
+        # LoadMonitor notifies ScheduleProvider about current changes (affects charging plan)
+        self._load_monitor.set_current_change_consumer(self._schedule_provider)
         set_load_monitor(self._load_monitor)
 
         # 6. Initialize SaveEyeMonitor (if configured)
