@@ -26,6 +26,7 @@ from .manual_fsm import ManualChargingFSM
 
 if TYPE_CHECKING:
     from .charging_fsm_base import ChargerStatus
+    from .schedule_provider import ScheduleProvider
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,9 @@ class FSMManager:
 
         # Track mode for switching
         self._current_mode = ChargingMode.SMART
+        
+        # Reference to schedule provider (set via set_schedule_provider)
+        self._schedule_provider: ScheduleProvider | None = None
 
         logger.info("FSMManager initialized with SmartChargingFSM active")
 
@@ -84,6 +88,10 @@ class FSMManager:
         self._smart_fsm.add_phase_detection_consumer(consumer)
         self._manual_fsm.add_phase_detection_consumer(consumer)
 
+    def set_schedule_provider(self, provider: ScheduleProvider) -> None:
+        """Set the schedule provider for mode-based enable/disable."""
+        self._schedule_provider = provider
+
     async def start(self) -> None:
         """Start the active FSM."""
         await self._active_fsm.start()
@@ -94,18 +102,23 @@ class FSMManager:
         await self._active_fsm.stop()
         logger.info("FSMManager stopped")
 
-    def set_mode(self, mode: ChargingMode) -> None:
+    async def set_mode(self, mode: ChargingMode) -> None:
         """
         Set charging mode and switch FSM if needed.
 
         SMART, SCHEDULED, SOLAR -> SmartChargingFSM
         MANUAL, IMMEDIATE -> ManualChargingFSM
+        
+        Also enables/disables scheduler based on mode:
+        - Smart modes: scheduler enabled
+        - Manual modes: scheduler disabled
         """
         old_mode = self._current_mode
         self._current_mode = mode
 
         # Determine which FSM should handle this mode
-        if mode in (ChargingMode.SMART, ChargingMode.SCHEDULED, ChargingMode.SOLAR):
+        is_smart_mode = mode in (ChargingMode.SMART, ChargingMode.SCHEDULED, ChargingMode.SOLAR)
+        if is_smart_mode:
             new_fsm = self._smart_fsm
         else:  # MANUAL, IMMEDIATE
             new_fsm = self._manual_fsm
@@ -132,6 +145,15 @@ class FSMManager:
 
         # Set mode on the active FSM
         self._active_fsm.set_mode(mode)
+        
+        # Enable/disable scheduler based on mode
+        if self._schedule_provider:
+            if is_smart_mode:
+                # Switching to smart mode - enable and recalculate
+                await self._schedule_provider.enable_and_recalculate()
+            else:
+                # Switching to manual mode - disable scheduler
+                self._schedule_provider.disable()
 
         logger.info(f"FSMManager: Mode set to {mode.value}")
 

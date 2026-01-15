@@ -318,15 +318,15 @@ class SmartChargingFSM(BaseChargingFSM):
             await self._transition_to(FSMState.ERROR, "Charger error")
             return
 
-        # Car just connected - transition to CAR_CONNECTED and evaluate
+        # Car just connected - transition to CAR_CONNECTED and start phase detection
         if new_charger_state.is_ready:
             was_disconnected = old_charger_state is None or not old_charger_state.is_car_connected
             if was_disconnected and self._context.state == FSMState.IDLE:
                 self._context.car_connected_at = datetime.now(timezone.utc)
                 await self._transition_to(FSMState.CAR_CONNECTED, "Car connected")
-                # Entry action: detect phases
+                # Entry action: detect phases (runs in background, doesn't block)
+                # _post_detection_evaluate will be called when detection completes
                 await self._do_detect_phases()
-                await self._evaluate_and_act()
                 return
 
         # =====================================================================
@@ -357,8 +357,15 @@ class SmartChargingFSM(BaseChargingFSM):
         
         If mismatch, take corrective action (with grace period).
         """
-        # Check grace period - don't spam commands
+        # Check command grace period - don't spam commands
         if self._is_in_command_grace_period():
+            return
+        
+        # Check LoadMonitor's phase switch grace period - charger may be unstable
+        from .load_monitor import get_load_monitor
+        load_monitor = get_load_monitor()
+        if load_monitor and load_monitor.is_in_grace_period():
+            logger.debug("SmartFSM: Skipping enforcement - LoadMonitor in grace period")
             return
 
         fsm_state = self._context.state
@@ -368,9 +375,10 @@ class SmartChargingFSM(BaseChargingFSM):
         # FSM wants to be CHARGING
         if fsm_state == FSMState.CHARGING:
             if charger_is_ready:
-                # Charger is ready but not charging - start it
-                logger.info("SmartFSM: Enforcing CHARGING intent - issuing start command")
-                await self._do_charge()
+                # Charger is ready but not charging - resume it
+                # Use resume instead of charge to avoid resetting current to 6A
+                logger.info("SmartFSM: Enforcing CHARGING intent - issuing resume command")
+                await self._do_resume()
             # If charger is already charging, good - nothing to do
 
         # FSM wants to be PAUSED (any pause state)
@@ -464,6 +472,15 @@ class SmartChargingFSM(BaseChargingFSM):
         elif state == FSMState.PAUSED_USER:
             # User pause - stay paused until user resumes
             pass
+    
+    async def _post_detection_evaluate(self) -> None:
+        """
+        Evaluate and act after phase detection completes.
+        
+        Called from background task with lock held.
+        """
+        logger.info("SmartFSM: Post-detection evaluation")
+        await self._evaluate_and_act()
 
     def _should_charge_now(self) -> bool:
         """Determine if charging should be active based on schedule."""

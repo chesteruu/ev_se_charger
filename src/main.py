@@ -103,6 +103,9 @@ class ChargingApplication:
         self._schedule_provider = ScheduleProvider(self._price_fetcher)
         self._schedule_provider.set_fsm(self._fsm_manager)
         set_schedule_provider(self._schedule_provider)
+        
+        # Wire FSMManager to ScheduleProvider for mode-based enable/disable
+        self._fsm_manager.set_schedule_provider(self._schedule_provider)
 
         # 5. Initialize LoadMonitor
         logger.info("Initializing load monitor...")

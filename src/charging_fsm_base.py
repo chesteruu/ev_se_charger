@@ -335,7 +335,7 @@ class BaseChargingFSM(ABC):
     """
 
     MIN_CHARGING_CURRENT = 6.0
-    COMMAND_GRACE_PERIOD_SECONDS = 15  # Grace period after issuing a command
+    COMMAND_GRACE_PERIOD_SECONDS = 30  # Grace period after issuing a command (allow charger to stabilize)
 
     def __init__(self, charger: ChargerController) -> None:
         """
@@ -355,6 +355,10 @@ class BaseChargingFSM(ABC):
         # Track when we last issued a command to avoid spamming
         self._last_command_time: datetime | None = None
         self._last_command_type: str | None = None  # "start", "pause", "resume", "stop"
+        
+        # Phase detection state - don't hold lock during detection
+        self._phase_detection_in_progress = False
+        self._phase_detection_task: asyncio.Task | None = None
 
     def add_phase_detection_consumer(self, consumer: PhaseDetectionConsumer) -> None:
         """Add a consumer for phase detection results (e.g., ScheduleProvider)."""
@@ -556,12 +560,26 @@ class BaseChargingFSM(ABC):
 
     async def _do_detect_phases(self) -> None:
         """
-        Perform phase detection and notify consumers.
+        Start phase detection in background (doesn't hold lock).
 
         Entry action for CAR_CONNECTED state.
         """
+        if self._phase_detection_in_progress:
+            logger.debug("FSM: Phase detection already in progress")
+            return
+        
+        self._phase_detection_in_progress = True
+        self._phase_detection_task = asyncio.create_task(self._run_phase_detection())
+        logger.info("FSM: Phase detection started in background")
+    
+    async def _run_phase_detection(self) -> None:
+        """
+        Run phase detection (called as background task).
+        
+        Does NOT hold the FSM lock - allows other events to process.
+        """
         try:
-            logger.info("FSM: Starting phase detection...")
+            logger.info("FSM: Running phase detection...")
             result = await self._charger.do_detect_phases()
 
             if result:
@@ -585,11 +603,32 @@ class BaseChargingFSM(ABC):
                         await consumer.on_phases_detected(result)
                     except Exception as e:
                         logger.warning(f"Error notifying phase detection consumer: {e}")
+                
+                # After detection, evaluate if we should start charging
+                # This needs the lock, so acquire it briefly
+                try:
+                    async with asyncio.timeout(5.0):
+                        async with self._lock:
+                            await self._post_detection_evaluate()
+                except asyncio.TimeoutError:
+                    logger.warning("FSM: Post-detection evaluation timed out")
             else:
                 logger.warning("FSM: Phase detection failed or not supported")
 
         except Exception as e:
             logger.error(f"FSM: Phase detection error: {e}")
+        finally:
+            self._phase_detection_in_progress = False
+            self._phase_detection_task = None
+    
+    async def _post_detection_evaluate(self) -> None:
+        """
+        Evaluate and act after phase detection completes.
+        
+        Override in subclasses for mode-specific behavior.
+        Default: do nothing.
+        """
+        pass
 
     async def _transition_to(self, new_state: FSMState, reason: str) -> None:
         """Transition to a new FSM state."""

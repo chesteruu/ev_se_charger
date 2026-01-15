@@ -513,8 +513,9 @@ class EaseeController:
             raise RuntimeError("Not connected to EASEE")
 
         # Clamp to valid range and convert to integer (Easee API requires int)
+        # Use round() instead of int() to avoid truncation errors (15.6 → 16, not 15)
         def clamp(val: float) -> int:
-            return int(max(self.MIN_CURRENT, min(val, self._max_current)))
+            return round(max(self.MIN_CURRENT, min(val, self._max_current)))
 
         # Use per-phase currents if provided, otherwise use default
         p1 = clamp(current_l1 if current_l1 is not None else current)

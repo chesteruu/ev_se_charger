@@ -355,7 +355,7 @@ def create_app(
                 detail=f"Invalid mode: {request.mode}. Valid: {list(mode_map.keys())}",
             )
 
-        app.state.fsm_manager.set_mode(mode)
+        await app.state.fsm_manager.set_mode(mode)
 
         return {
             "status": "ok",

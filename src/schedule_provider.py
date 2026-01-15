@@ -129,6 +129,10 @@ class ScheduleProvider:
         self._scheduler = AsyncIOScheduler()
         self._current_plan: ChargingPlan | None = None
         self._running = False
+        
+        # Enabled flag - when False, scheduler skips calculations
+        # Used to disable scheduling during manual charging mode
+        self._enabled = True
 
         # Configuration
         config = get_config()
@@ -189,6 +193,41 @@ class ScheduleProvider:
         self.add_consumer(fsm)
 
     # =========================================================================
+    # Enable/Disable for Manual Mode
+    # =========================================================================
+
+    @property
+    def enabled(self) -> bool:
+        """Check if scheduler is enabled."""
+        return self._enabled
+
+    def disable(self) -> None:
+        """
+        Disable schedule calculations.
+        
+        Used when switching to manual charging mode.
+        The scheduler will skip all calculations until re-enabled.
+        """
+        if self._enabled:
+            logger.info("ScheduleProvider: Disabled (manual charging mode)")
+            self._enabled = False
+
+    async def enable_and_recalculate(self) -> None:
+        """
+        Enable schedule calculations and force recalculation.
+        
+        Used when switching from manual to smart charging mode.
+        """
+        if not self._enabled:
+            logger.info("ScheduleProvider: Enabled (smart charging mode) - recalculating")
+            self._enabled = True
+            # Force recalculation
+            await self._create_daily_plan()
+            await self._evaluate_schedule()
+        else:
+            logger.debug("ScheduleProvider: Already enabled")
+
+    # =========================================================================
     # PhaseDetectionConsumer interface
     # =========================================================================
 
@@ -243,6 +282,10 @@ class ScheduleProvider:
         Updates effective power and recalculates plan if power changed >20%
         from what was assumed when the plan was created.
         """
+        # Skip if disabled (manual charging mode)
+        if not self._enabled:
+            return
+            
         # Calculate effective power based on available current
         voltage = 230  # V (typical EU voltage)
         effective_power_kw = (available_current * voltage * phases) / 1000
@@ -360,7 +403,13 @@ class ScheduleProvider:
         - Target kWh changes (set_target_kwh)
         - Phase detection completes (on_phases_detected)
         - Scheduled times (midnight/noon)
+        - enable_and_recalculate() is called
         """
+        # Skip if disabled (manual charging mode)
+        if not self._enabled:
+            logger.debug("ScheduleProvider: Skipping plan creation - disabled")
+            return
+            
         try:
             forecast = await self._price_fetcher.get_prices()
             
@@ -443,6 +492,11 @@ class ScheduleProvider:
 
     async def _evaluate_schedule(self) -> None:
         """Evaluate current schedule and notify all consumers."""
+        # Skip if disabled (manual charging mode)
+        if not self._enabled:
+            logger.debug("ScheduleProvider: Skipping evaluation - disabled")
+            return
+            
         if not self._consumers:
             return
 

@@ -89,6 +89,8 @@ class LoadMonitor:
     MIN_CHARGING_CURRENT = 6.0  # Minimum charging current (A)
     PHASE_SWITCH_GRACE_SECONDS = 15.0  # Grace period after phase switch
     CURRENT_CHANGE_THRESHOLD = 2.0  # Only notify scheduler if current changed by this much (A)
+    CURRENT_SET_COOLDOWN_SECONDS = 15.0  # Minimum time between current adjustments
+    CURRENT_DEAD_BAND = 4.0  # Dead band around current setting - ignore changes smaller than this
 
     def __init__(self) -> None:
         config = get_config()
@@ -103,6 +105,7 @@ class LoadMonitor:
         self._current_change_consumer: CurrentChangeConsumer | None = None
         self._last_status: LoadStatus | None = None
         self._last_set_current: float = 0.0  # Track what we last set
+        self._last_set_time: datetime | None = None  # Track when we last set current
         self._last_notified_current: float = 0.0  # Track what we last notified to scheduler
         self._running = False
 
@@ -145,9 +148,25 @@ class LoadMonitor:
         
         This triggers a grace period to avoid false load protection
         due to stale SaveEye readings during phase switches.
+        Also resets current tracking so we don't carry over stale values.
         """
         logger.info("Charger resumed - starting phase switch grace period")
         self._phase_switch_time = datetime.now(timezone.utc)
+        # Reset current tracking so we can set fresh values after grace period
+        self._last_set_current = 0.0
+        self._last_set_time = None
+
+    def is_in_grace_period(self) -> bool:
+        """
+        Check if we're in the phase switch grace period.
+        
+        During this period, charger state may be unstable and FSM
+        should not enforce its intent aggressively.
+        """
+        if self._phase_switch_time is None:
+            return False
+        elapsed = (datetime.now(timezone.utc) - self._phase_switch_time).total_seconds()
+        return elapsed < self.PHASE_SWITCH_GRACE_SECONDS
 
     async def on_power_reading(
         self,
@@ -362,14 +381,38 @@ class LoadMonitor:
         # DIRECTLY SET CURRENT if charging and current changed significantly
         # =====================================================================
         if is_charging and self._current_controller and not should_pause:
-            # Only set if current changed by at least 1A
-            if abs(recommended - self._last_set_current) >= 1.0:
+            # Check cooldown - don't set current too frequently
+            now = datetime.now(timezone.utc)
+            in_cooldown = (
+                self._last_set_time is not None and
+                (now - self._last_set_time).total_seconds() < self.CURRENT_SET_COOLDOWN_SECONDS
+            )
+            
+            # Dead band: only change if recommended is outside [last_set - deadband, last_set + deadband]
+            # This prevents oscillation from small fluctuations (e.g., 13A <-> 16A)
+            change = abs(recommended - self._last_set_current)
+            is_first_set = self._last_set_current == 0.0
+            outside_dead_band = change >= self.CURRENT_DEAD_BAND
+            
+            # Only set if:
+            # 1. First time OR outside dead band
+            # 2. Either cooldown has passed OR it's an emergency decrease >= 6A
+            is_emergency = recommended < self._last_set_current - 6.0
+            should_set_current = (is_first_set or outside_dead_band) and (
+                not in_cooldown or is_emergency
+            )
+            
+            if should_set_current:
+                logger.debug(
+                    f"Current adjustment: {self._last_set_current:.0f}A -> {recommended:.0f}A "
+                    f"(change={change:.0f}A, deadband={self.CURRENT_DEAD_BAND}A, first={is_first_set})"
+                )
                 try:
                     if self._detected_phases >= 3:
                         # 3-phase: set each phase to its available current
                         logger.info(
                             f"LoadMonitor: Setting 3-phase current: "
-                            f"L1={set_l1:.0f}A, L2={set_l2:.0f}A, L3={set_l3:.0f}A"
+                            f"L1={set_l1:.1f}A, L2={set_l2:.1f}A, L3={set_l3:.1f}A"
                         )
                         await self._current_controller.do_set_current(
                             current=recommended,
@@ -380,14 +423,21 @@ class LoadMonitor:
                         )
                     else:
                         # 1-phase: set single current (charger uses active phase)
-                        logger.info(f"LoadMonitor: Setting 1-phase current: {recommended:.0f}A")
+                        logger.info(f"LoadMonitor: Setting 1-phase current: {recommended:.1f}A")
                         await self._current_controller.do_set_current(
                             current=recommended,
                             phases=1,
                         )
                     self._last_set_current = recommended
+                    self._last_set_time = now
                 except Exception as e:
                     logger.error(f"LoadMonitor: Failed to set current: {e}")
+            elif change >= 2.0:
+                # Log when we skip a noticeable change (inside dead band)
+                logger.debug(
+                    f"Skipping current change {self._last_set_current:.0f}A -> {recommended:.0f}A "
+                    f"(change={change:.0f}A < deadband={self.CURRENT_DEAD_BAND}A)"
+                )
 
         # =====================================================================
         # NOTIFY SCHEDULER if current changed significantly (affects charging plan)

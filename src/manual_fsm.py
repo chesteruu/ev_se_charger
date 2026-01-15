@@ -285,24 +285,16 @@ class ManualChargingFSM(BaseChargingFSM):
             await self._transition_to(FSMState.ERROR, "Charger error")
             return
 
-        # Car just connected - transition to CAR_CONNECTED
+        # Car just connected - transition to CAR_CONNECTED and start phase detection
         if new_charger_state.is_ready:
             was_disconnected = old_charger_state is None or not old_charger_state.is_car_connected
             if was_disconnected and self._context.state == FSMState.IDLE:
                 self._context.car_connected_at = datetime.now(timezone.utc)
                 await self._transition_to(FSMState.CAR_CONNECTED, "Car connected")
                 
-                # Phase detection
+                # Phase detection (runs in background, doesn't block)
+                # _post_detection_evaluate will be called when detection completes
                 await self._do_detect_phases()
-                
-                # In IMMEDIATE mode, transition to CHARGING (intent)
-                if self._context.mode == ChargingMode.IMMEDIATE:
-                    if not self._context.load.should_pause:
-                        self._context.charging_started_at = datetime.now(timezone.utc)
-                        await self._transition_to(FSMState.CHARGING, "Immediate mode - auto start")
-                    else:
-                        logger.info("ManualFSM: Immediate mode - waiting for load protection to clear")
-                        await self._transition_to(FSMState.PAUSED_LOAD, "Load protection")
                 return
 
         # =====================================================================
@@ -333,8 +325,15 @@ class ManualChargingFSM(BaseChargingFSM):
         
         If mismatch, take corrective action (with grace period).
         """
-        # Check grace period - don't spam commands
+        # Check command grace period - don't spam commands
         if self._is_in_command_grace_period():
+            return
+        
+        # Check LoadMonitor's phase switch grace period - charger may be unstable
+        from .load_monitor import get_load_monitor
+        load_monitor = get_load_monitor()
+        if load_monitor and load_monitor.is_in_grace_period():
+            logger.debug("ManualFSM: Skipping enforcement - LoadMonitor in grace period")
             return
 
         fsm_state = self._context.state
@@ -344,9 +343,10 @@ class ManualChargingFSM(BaseChargingFSM):
         # FSM wants to be CHARGING
         if fsm_state == FSMState.CHARGING:
             if charger_is_ready:
-                # Charger is ready but not charging - start it
-                logger.info("ManualFSM: Enforcing CHARGING intent - issuing start command")
-                await self._do_charge()
+                # Charger is ready but not charging - resume it
+                # Use resume instead of charge to avoid resetting current to 6A
+                logger.info("ManualFSM: Enforcing CHARGING intent - issuing resume command")
+                await self._do_resume()
             # If charger is already charging, good - nothing to do
 
         # FSM wants to be PAUSED_USER
@@ -375,6 +375,25 @@ class ManualChargingFSM(BaseChargingFSM):
                     logger.info("ManualFSM: Charger started externally - transitioning to CHARGING")
                     self._context.charging_started_at = datetime.now(timezone.utc)
                     await self._transition_to(FSMState.CHARGING, "External start")
+    
+    async def _post_detection_evaluate(self) -> None:
+        """
+        Evaluate and act after phase detection completes.
+        
+        Called from background task with lock held.
+        """
+        logger.info("ManualFSM: Post-detection evaluation")
+        
+        # In IMMEDIATE mode, auto-start after phase detection
+        if self._context.mode == ChargingMode.IMMEDIATE:
+            if self._context.state == FSMState.CAR_CONNECTED:
+                if not self._context.load.should_pause:
+                    await self._do_charge()
+                    self._context.charging_started_at = datetime.now(timezone.utc)
+                    await self._transition_to(FSMState.CHARGING, "Immediate mode - auto start")
+                else:
+                    logger.info("ManualFSM: Immediate mode - waiting for load protection to clear")
+                    await self._transition_to(FSMState.PAUSED_LOAD, "Load protection")
 
     # =========================================================================
     # STATUS
