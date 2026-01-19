@@ -84,6 +84,11 @@ class LoadMonitor:
     - DIRECTLY sets charging current via CurrentController
     - Notifies FSM about should_pause signal
     - Notifies ScheduleProvider about current changes (affects charging plan)
+    
+    Race Condition Handling:
+    - SaveEye updates faster than Easee reports current
+    - When we set a new current, we track it as "expected" EV current
+    - During ramp-up period, use max(expected, reported) to avoid false overload
     """
 
     MIN_CHARGING_CURRENT = 6.0  # Minimum charging current (A)
@@ -91,6 +96,9 @@ class LoadMonitor:
     CURRENT_CHANGE_THRESHOLD = 2.0  # Only notify scheduler if current changed by this much (A)
     CURRENT_SET_COOLDOWN_SECONDS = 15.0  # Minimum time between current adjustments
     CURRENT_DEAD_BAND = 4.0  # Dead band around current setting - ignore changes smaller than this
+    
+    # How long to trust expected current over reported (charger ramp-up time)
+    EXPECTED_CURRENT_TIMEOUT_SECONDS = 45.0
 
     def __init__(self) -> None:
         config = get_config()
@@ -108,6 +116,12 @@ class LoadMonitor:
         self._last_set_time: datetime | None = None  # Track when we last set current
         self._last_notified_current: float = 0.0  # Track what we last notified to scheduler
         self._running = False
+        
+        # Expected EV current tracking (for race condition handling)
+        # When we set current, we expect the charger to draw this amount
+        # Use this during ramp-up period when charger hasn't reported yet
+        self._expected_ev_current: float = 0.0
+        self._expected_current_time: datetime | None = None
 
         # Smoothing
         self._reading_history: list[float] = []
@@ -133,6 +147,70 @@ class LoadMonitor:
         self._detected_phases = phases
         logger.info(f"LoadMonitor: Detected phases updated to {phases}")
 
+    def set_expected_ev_current(self, current: float) -> None:
+        """
+        Set the expected EV current (called when charging starts or current changes).
+        
+        This helps avoid false load protection during ramp-up when SaveEye sees
+        the load but Easee hasn't reported the new current yet.
+        
+        Args:
+            current: Expected charging current in Amps
+        """
+        self._expected_ev_current = current
+        self._expected_current_time = datetime.now(timezone.utc)
+        logger.info(f"LoadMonitor: Expected EV current set to {current:.1f}A")
+
+    def clear_expected_ev_current(self) -> None:
+        """Clear expected EV current (called when charging stops/pauses)."""
+        self._expected_ev_current = 0.0
+        self._expected_current_time = None
+        logger.debug("LoadMonitor: Expected EV current cleared")
+
+    def _get_effective_ev_current(self, reported_current: float, is_charging: bool) -> float:
+        """
+        Get the effective EV current, considering expected vs reported.
+        
+        During ramp-up period after setting current:
+        - If reported < expected, use expected (SaveEye is ahead of Easee)
+        - Once charger reports >= expected, trust the reported value
+        
+        Args:
+            reported_current: Current reported by charger
+            is_charging: Whether charger is currently charging
+            
+        Returns:
+            Effective EV current to use for load calculations
+        """
+        if not is_charging:
+            return reported_current
+        
+        # Check if we're in the expected current window
+        if self._expected_current_time is None or self._expected_ev_current <= 0:
+            return reported_current
+        
+        elapsed = (datetime.now(timezone.utc) - self._expected_current_time).total_seconds()
+        
+        # Timeout: after N seconds, trust the charger's reported value
+        if elapsed > self.EXPECTED_CURRENT_TIMEOUT_SECONDS:
+            return reported_current
+        
+        # During ramp-up: use max(expected, reported)
+        # This handles the case where SaveEye sees load before Easee reports
+        if reported_current < self._expected_ev_current:
+            logger.debug(
+                f"Using expected EV current: {self._expected_ev_current:.1f}A "
+                f"(reported={reported_current:.1f}A, elapsed={elapsed:.1f}s)"
+            )
+            return self._expected_ev_current
+        
+        # Charger has ramped up - clear the expected tracking
+        # (avoid using stale expected value if it decreases later)
+        if reported_current >= self._expected_ev_current * 0.9:  # Within 10%
+            self._expected_current_time = None
+        
+        return reported_current
+
     def add_consumer(self, consumer: LoadConsumer) -> None:
         """Add a load consumer (e.g., FSM) for should_pause notifications."""
         self._consumers.append(consumer)
@@ -142,19 +220,29 @@ class LoadMonitor:
         """Add FSM as a load consumer."""
         self.add_consumer(fsm)
 
-    def signal_charger_resumed(self) -> None:
+    def signal_charger_resumed(self, expected_current: float | None = None) -> None:
         """
         Signal that the charger just resumed from pause/awaiting state.
         
         This triggers a grace period to avoid false load protection
         due to stale SaveEye readings during phase switches.
         Also resets current tracking so we don't carry over stale values.
+        
+        Args:
+            expected_current: If known, the expected charging current after resume
         """
         logger.info("Charger resumed - starting phase switch grace period")
         self._phase_switch_time = datetime.now(timezone.utc)
         # Reset current tracking so we can set fresh values after grace period
         self._last_set_current = 0.0
         self._last_set_time = None
+        
+        # Set expected EV current if provided (helps during ramp-up)
+        if expected_current is not None and expected_current > 0:
+            self.set_expected_ev_current(expected_current)
+        else:
+            # Default to minimum current if not specified
+            self.set_expected_ev_current(self.MIN_CHARGING_CURRENT)
 
     def is_in_grace_period(self) -> bool:
         """
@@ -204,7 +292,17 @@ class LoadMonitor:
         # which includes all loads on the circuit, not just EV)
         if charger_status and charger_status.is_charging and charger_status.power_watts > 100:
             # Use charger's reported output current as the actual EV current
-            ev_current = charger_status.current_amps or 0.0
+            reported_ev_current = charger_status.current_amps or 0.0
+            
+            # Apply effective current calculation to handle race condition
+            # (SaveEye sees load before Easee reports new current)
+            ev_current = self._get_effective_ev_current(reported_ev_current, is_charging=True)
+            
+            if ev_current != reported_ev_current:
+                logger.debug(
+                    f"EV current adjusted: reported={reported_ev_current:.1f}A, "
+                    f"effective={ev_current:.1f}A"
+                )
             
             # Use per-phase circuit currents only to DETECT which phase is active
             # (these values may include other circuit loads, so don't use them as EV current)
@@ -275,6 +373,9 @@ class LoadMonitor:
             is_charging = False
             # Reset phase tracking when not charging
             self._last_ev_phase = None
+            # Clear expected EV current when not charging
+            if self._expected_ev_current > 0:
+                self.clear_expected_ev_current()
 
         # Calculate home load by subtracting EV from detected phase(s)
         home_l1 = max(0, current_l1 - ev_l1)
@@ -430,6 +531,10 @@ class LoadMonitor:
                         )
                     self._last_set_current = recommended
                     self._last_set_time = now
+                    
+                    # Update expected EV current to handle race condition
+                    # (SaveEye sees load before Easee reports the new current)
+                    self.set_expected_ev_current(recommended)
                 except Exception as e:
                     logger.error(f"LoadMonitor: Failed to set current: {e}")
             elif change >= 2.0:
